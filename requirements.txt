@@ -1,0 +1,14 @@
+numpy
+pandas
+scipy
+Pillow
+torch
+torchvision
+transformers
+umap-learn
+scikit-learn
+streamlit
+plotly
+fastapi
+uvicorn[standard]
+streamlit

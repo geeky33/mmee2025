@@ -1,0 +1,1 @@
+"""Hashing / IO helpers (placeholder)."""
