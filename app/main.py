@@ -2,6 +2,7 @@
 # MMEE Embedding Viewer (uses utils/clip_utils)
 # Streamlit app: projections (PCA / t-SNE / UMAP) for IMAGE and TEXT embeddings
 # + Outlier detection (multiple methods), removal, and clean-view UI
+# + Authenticity evaluation vs injected bad captions (Precision/Recall/F1 + Confusion Matrix + Examples)
 #
 # Usage:
 #   streamlit run app/main.py
@@ -17,6 +18,10 @@ import plotly.graph_objects as go
 from scipy.linalg import orthogonal_procrustes
 from importlib import import_module
 from collections import defaultdict
+
+# Silence optional QuickGELU warning if you see it
+import warnings
+warnings.filterwarnings("ignore", message="QuickGELU mismatch.*")
 
 # -- ensure project root (parent of app/) is on sys.path
 PROJ_DIR = Path(__file__).resolve().parents[1]
@@ -78,6 +83,7 @@ if iforest_detect is None or iforest_on_raw is None:
                        max_samples="auto", random_state=42, return_model=False):
         if _IF is None:
             raise RuntimeError("scikit-learn IsolationForest not available")
+        
         X = np.asarray(X, dtype=np.float32, order="C")
         model = _IF(n_estimators=n_estimators, contamination=contamination,
                     max_samples=max_samples, random_state=random_state, n_jobs=-1)
@@ -139,6 +145,33 @@ IMAGES_DIR    = DATASETS[dataset_name]["images"]
 CAPTIONS_JSON = DATASETS[dataset_name]["captions"]
 LABELS_JSON   = DATASETS[dataset_name]["labels"]
 
+# ---- Captions source toggle + GT load ----
+CAPTIONS_NOISE_JSON = CAPTIONS_JSON.with_name("captions_with_noise.json")
+BAD_GT_JSON = CAPTIONS_JSON.with_name("bad_caption_gt.json")
+
+with st.sidebar:
+    st.header("Captions source")
+    options = ["Original"] + (["With noise"] if CAPTIONS_NOISE_JSON.exists() else [])
+    captions_choice = st.radio(
+        "Select captions file",
+        options,
+        index=0,
+        help="Use tools/add_bad_captions.py to generate captions_with_noise.json + bad_caption_gt.json"
+    )
+
+ACTIVE_CAPTIONS_JSON = CAPTIONS_NOISE_JSON if (captions_choice == "With noise" and CAPTIONS_NOISE_JSON.exists()) else CAPTIONS_JSON
+
+BAD_GT: Dict[str, List[int]] = {}
+if captions_choice == "With noise" and BAD_GT_JSON.exists():
+    try:
+        with open(BAD_GT_JSON, "r", encoding="utf-8") as f:
+            BAD_GT = json.load(f)  # dict: image_relpath/name -> [0/1,...]
+        st.caption("Ground-truth for injected bad captions: found ✅")
+    except Exception as e:
+        st.warning(f"Failed to load bad_caption_gt.json: {e}")
+else:
+    st.caption("Ground-truth for bad captions: not active (Original captions).")
+
 # -----------------------------
 # Data loading (images, captions, labels)
 # -----------------------------
@@ -179,11 +212,6 @@ def _derive_class_from_folder(image_path: Path, images_root: Path) -> str:
     return image_path.stem.split("_")[0]
 
 def read_labels(labels_path: Path, image_paths: List[Path], images_root: Path) -> pd.DataFrame:
-    """
-    Read labels.json (dict/list) or infer from folder structure.
-    - If dict value is a list (multi-label), we use the FIRST label as primary class for coloring.
-    - If list is empty (e.g., COCO images without instances), we assign 'unlabeled'.
-    """
     records: List[Dict[str, Any]] = []
 
     by_stem = {p.stem: p for p in image_paths}
@@ -221,13 +249,13 @@ def read_labels(labels_path: Path, image_paths: List[Path], images_root: Path) -
                 if not p:
                     continue
                 class_id = None
-                if isinstance(meta, list):        # multi-label
+                if isinstance(meta, list):
                     classes = [str(x) for x in meta if str(x).strip()]
                     class_name = classes[0] if classes else "unlabeled"
-                elif isinstance(meta, dict):     # explicit mapping
+                elif isinstance(meta, dict):
                     class_id = meta.get("class_id")
                     class_name = meta.get("class_name") or "unlabeled"
-                else:                             # single string
+                else:
                     class_name = str(meta) if meta else "unlabeled"
 
                 records.append({
@@ -238,7 +266,7 @@ def read_labels(labels_path: Path, image_paths: List[Path], images_root: Path) -
                 })
                 used.add(p)
 
-    # Fill any unlabeled with folder-derived class (for datasets like CUB)
+    # Fill any unlabeled with folder-derived class
     for p in image_paths:
         if p in used:
             continue
@@ -295,9 +323,7 @@ def _l2_normalize_np(X: np.ndarray, eps: float = 1e-12) -> np.ndarray:
     return (X / n).astype(np.float32, copy=False)
 
 def _rowwise_cosine(A: np.ndarray, B: np.ndarray) -> np.ndarray:
-    """Cosine similarity for pairs (Ai, Bi)."""
-    A = _l2_normalize_np(A)
-    B = _l2_normalize_np(B)
+    A = _l2_normalize_np(A); B = _l2_normalize_np(B)
     return (A * B).sum(axis=1).astype(np.float32, copy=False)
 
 @st.cache_data(show_spinner=False)
@@ -307,15 +333,10 @@ def project_2d(X: np.ndarray, method: str, random_state: int,
     if m == "pca":
         return pca_project(X, n_components=2)
     if m == "tsne":
-        return tsne_project(
-            X, n_components=2, perplexity=int(tsne_perplexity),
-            random_state=int(random_state)
-        )
+        return tsne_project(X, n_components=2, perplexity=int(tsne_perplexity), random_state=int(random_state))
     if m == "umap":
         coords_2d, _ = umap_project(
-            X, n_neighbors=int(umap_neighbors),
-            min_dist=float(umap_min_dist),
-            random_state=int(random_state),
+            X, n_neighbors=int(umap_neighbors), min_dist=float(umap_min_dist), random_state=int(random_state)
         )
         return coords_2d
     raise ValueError(f"Unknown method: {method}")
@@ -330,16 +351,9 @@ def project_images_and_text(I: np.ndarray,
                             per_caption: bool,
                             cap_img_idx: list[int] | None = None
                             ) -> tuple[np.ndarray, np.ndarray]:
-    """
-    If not per_caption (and lengths match): Procrustes-align T to I (one caption per image).
-    If per_caption: Procrustes-align each caption vector to its parent image vector
-    using cap_img_idx, then project images + aligned captions on a shared 2D basis.
-    """
     if not per_caption and I.shape[0] == T.shape[0]:
-        I_n = _l2_normalize_np(I)
-        T_n = _l2_normalize_np(T)
-        Ic = I_n - I_n.mean(0, keepdims=True)
-        Tc = T_n - T_n.mean(0, keepdims=True)
+        I_n = _l2_normalize_np(I); T_n = _l2_normalize_np(T)
+        Ic = I_n - I_n.mean(0, keepdims=True); Tc = T_n - T_n.mean(0, keepdims=True)
         R, s = orthogonal_procrustes(Tc, Ic)
         T_aligned = (Tc @ R) * s + I_n.mean(0, keepdims=True)
         X = np.vstack([I_n, T_aligned])
@@ -350,35 +364,30 @@ def project_images_and_text(I: np.ndarray,
     if per_caption:
         assert cap_img_idx is not None and len(cap_img_idx) == T.shape[0], \
             "cap_img_idx must map each caption to its parent image index"
-        I_n = _l2_normalize_np(I)
-        T_n = _l2_normalize_np(T)
+        I_n = _l2_normalize_np(I); T_n = _l2_normalize_np(T)
         I_rep = I_n[np.asarray(cap_img_idx, dtype=int), :]  # repeat parent image for each caption
-
-        Ic = I_rep - I_rep.mean(0, keepdims=True)
-        Tc = T_n - T_n.mean(0, keepdims=True)
+        Ic = I_rep - I_rep.mean(0, keepdims=True); Tc = T_n - T_n.mean(0, keepdims=True)
         R, s = orthogonal_procrustes(Tc, Ic)
         T_aligned = (Tc @ R) * s + I_rep.mean(0, keepdims=True)
-
         X = np.vstack([I_n, T_aligned])
         Y = project_2d(X, method, random_state, tsne_perplexity, umap_neighbors, umap_min_dist)
         n = I.shape[0]
         return Y[:n], Y[n:]
 
-    # fallback (shouldn't hit)
-    I_n = _l2_normalize_np(I)
-    T_n = _l2_normalize_np(T)
+    # include umap_neighbors (bugfix: avoid passing min_dist twice)
+    I_n = _l2_normalize_np(I); T_n = _l2_normalize_np(T)
     X = np.vstack([I_n, T_n])
     Y = project_2d(X, method, random_state, tsne_perplexity, umap_neighbors, umap_min_dist)
     n = I.shape[0]
     return Y[:n], Y[n:]
 
 # -----------------------------
-# Sidebar controls (Model / Projection / Outliers)
+# Sidebar controls (Model / Projection / Outliers / Evaluation)
 # -----------------------------
 with st.sidebar:
     st.header("Paths")
     st.code(str(IMAGES_DIR), language="bash")
-    st.code(str(CAPTIONS_JSON), language="bash")
+    st.code(str(ACTIVE_CAPTIONS_JSON), language="bash")
     st.code(str(LABELS_JSON), language="bash")
 
     st.header("Model")
@@ -397,8 +406,11 @@ with st.sidebar:
     caption_mode = st.radio("Caption granularity", ["Aggregate per image", "Per-caption points"], index=0)
     per_caption = (caption_mode == "Per-caption points")
     if per_caption:
-        caps_limit = st.slider("Captions per image to plot", 1, 10, 5, step=1)
-        st.caption("We embed each caption separately and build a joint point for each (image, caption) pair.")
+        caps_limit = st.number_input(
+            "Max captions/image (0 = all)",
+            min_value=0, value=0, step=1,
+            help="We embed the first K captions per image. Set 0 to use all captions."
+        )
     else:
         text_agg = st.selectbox("Text aggregation", ["average", "first"], index=0)
 
@@ -440,8 +452,13 @@ with st.sidebar:
     run_detection   = st.checkbox("Run detection", value=False)
     remove_outliers = st.checkbox("Remove outliers (show clean data)", value=False)
     show_clean_only = st.checkbox("Show only clean data in plots", value=False)
-    outlier_size    = st.slider("Outlier marker size", 6, 20, 10, help="Size of the white X markers")
+    outlier_size    = st.slider("Outlier marker size", 6, 20, 10, help="Size of the X markers")
     outlier_width   = st.slider("Outlier stroke width", 1, 5, 2)
+
+    st.header("Evaluation (vs GT)")
+    show_eval = st.checkbox("Show authenticity metrics & examples", value=True)
+    overlay_auth = st.checkbox("Overlay authenticity on plots", value=True)
+    n_examples = st.slider("Examples per bucket (TP/FP/FN)", 1, 10, 3)
 
 # -----------------------------
 # Load dataset
@@ -451,12 +468,9 @@ with st.status("Loading dataset (images, labels, captions)…", expanded=False):
     if not IMG_PATHS:
         st.error("No images found under data/images.")
         st.stop()
-    CAP_MAP = read_captions(CAPTIONS_JSON)
+    CAP_MAP = read_captions(ACTIVE_CAPTIONS_JSON)
     DF = read_labels(LABELS_JSON, IMG_PATHS, IMAGES_DIR)
 
-# -----------------------------
-# Subset & sampling controls (dataset-aware)
-# -----------------------------
 # -----------------------------
 # Subset & Sampling controls (dataset-aware)
 # -----------------------------
@@ -467,15 +481,14 @@ with st.sidebar:
     n_classes = len(all_classes)
 
     if n_classes <= 1:
-        # Edge case: only one class available
         st.info(f"Only one class detected for [{dataset_name}].")
         max_classes_to_show = 1
-        default_classes = all_classes  # that's the only option
+        default_classes = all_classes
     else:
         max_classes_to_show = st.slider(
             "Max classes to include",
             min_value=1,
-            max_value=n_classes,                       # strictly > 1 here
+            max_value=n_classes,
             value=min(30, n_classes),
             key=f"max_classes_{dataset_name}"
         )
@@ -488,8 +501,6 @@ with st.sidebar:
         key=f"chosen_classes_{dataset_name}"
     )
 
-    # keep the samples-per-class slider inside a valid range
-    # compute an upper bound from the data to make the default meaningful
     max_per_class_in_data = int(DF["class_name"].value_counts().max()) if not DF.empty else 1
     upper_samples = max(1, min(500, max_per_class_in_data))
     default_samples = min(30, upper_samples)
@@ -514,13 +525,16 @@ if samples_per_class > 0:
         lambda g: g.sample(min(len(g), samples_per_class), random_state=42)
     ).reset_index(drop=True)
 
-
 st.success(f"[{dataset_name}] Using {len(DF)} images across {DF['class_name'].nunique()} classes.")
 
 # Align captions per selected image order (per-image list)
 ALL_CAPS = captions_for_images([Path(p) for p in DF["image_path"].tolist()], CAP_MAP, IMAGES_DIR)
 caps_available = sum(1 for c in ALL_CAPS if c)
 st.caption(f"Captions available for {caps_available}/{len(ALL_CAPS)} selected images.")
+# ---- Tell the user whether we’re using all captions or only first K ----
+if per_caption:
+    sel_note = "all captions per image" if caps_limit == 0 else f"first {caps_limit} captions/image"
+    st.info(f"GT positives computed over current subset and {sel_note}.")
 
 # Build per-caption payload if requested
 cap_payload: List[List[str]]
@@ -531,7 +545,7 @@ if per_caption:
     for i, caps in enumerate(ALL_CAPS):
         if not caps:
             continue
-        take = caps[:caps_limit]
+        take = caps if caps_limit == 0 else caps[:caps_limit]
         for c in take:
             cap_payload.append([c])  # each item is a single-caption list
             cap_texts.append(c)
@@ -560,7 +574,6 @@ def _img_emb_cached(paths: List[str], model: str, weights: str, bs: int, key: st
 
 @st.cache_data(show_spinner=False)
 def _txt_emb_cached(caps: List[List[str]], model: str, weights: str, agg: str, key: str) -> np.ndarray:
-    # agg is "average"/"first" in aggregate mode; ignored for per-caption (each list has one string)
     return _compute_text_embeddings(caps, model_name=model, pretrained=weights, aggregate=agg)
 
 # -----------------------------
@@ -593,8 +606,8 @@ if st.session_state.get("EMB_SIG") != CUR_SIG:
     st.warning("Settings changed. Please recompute IMAGE and TEXT embeddings.")
     st.stop()
 
-IMG = st.session_state.IMG_EMB                   # shape = n_images x d
-TXT = st.session_state.TXT_EMB                   # shape = n_images (agg) or n_caps (per-caption)
+IMG = st.session_state.IMG_EMB
+TXT = st.session_state.TXT_EMB
 n_images = len(DF)
 if IMG.shape[0] != n_images or TXT.shape[0] != n_txt_expected:
     for k in ("IMG_EMB", "TXT_EMB", "EMB_SIG"):
@@ -606,20 +619,16 @@ if IMG.shape[0] != n_images or TXT.shape[0] != n_txt_expected:
 # Build projections + pairwise cosine similarities
 # -----------------------------
 if per_caption:
-    # project images (unique) and text (per-caption) together, with alignment
     P_IMG, P_TXT = project_images_and_text(
         IMG, TXT, method, int(random_state), int(tsne_perplexity),
         int(umap_neighbors), float(umap_min_dist),
         per_caption=True, cap_img_idx=cap_img_idx
     )
-    # joint embedding per caption: repeat each image embedding for each caption and blend
     IMG_rep = IMG[np.asarray(cap_img_idx, dtype=int), :] if len(cap_img_idx) > 0 \
               else np.zeros((0, IMG.shape[1]), dtype=np.float32)
     J = joint_weighted_embeddings(IMG_rep, TXT, alpha=alpha_joint)
-
-    # cosine similarity for (image, caption) pairs (rowwise)
     cos_pairs_caps = _rowwise_cosine(IMG_rep, TXT) if len(IMG_rep) else np.zeros((0,), dtype=np.float32)
-    # average per-image cosine for hover on image points
+
     sim_by_img = defaultdict(list)
     for j, i in enumerate(cap_img_idx):
         sim_by_img[i].append(float(cos_pairs_caps[j]))
@@ -627,14 +636,13 @@ if per_caption:
     for i, vals in sim_by_img.items():
         cos_per_image[i] = float(np.mean(vals))
 else:
-    # regular equal-length joint projection (aggregate)
     P_IMG, P_TXT = project_images_and_text(
         IMG, TXT, method, int(random_state), int(tsne_perplexity),
         int(umap_neighbors), float(umap_min_dist),
         per_caption=False, cap_img_idx=None
     )
     J = joint_weighted_embeddings(IMG, TXT, alpha=alpha_joint)
-    cos_pairs_caps = _rowwise_cosine(IMG, TXT)             # one per image
+    cos_pairs_caps = _rowwise_cosine(IMG, TXT)
     cos_per_image = cos_pairs_caps.copy()
 
 # -----------------------------
@@ -646,7 +654,6 @@ colors = {
     for i, name in enumerate(class_names_sorted)
 }
 
-# Image points (always one per image)
 df_img2 = pd.DataFrame({
     "x": P_IMG[:, 0],
     "y": P_IMG[:, 1],
@@ -654,12 +661,11 @@ df_img2 = pd.DataFrame({
     "class_id": DF["class_id"].values,
     "image_relpath": DF["image_relpath"].values,
     "caption_short": [""] * n_images,
-    "cosine_sim": cos_per_image,        # may be NaN in per-caption mode for images without captions
+    "cosine_sim": cos_per_image,
     "anomaly": False,
     "anomaly_score": 0.0,
 })
 
-# Text points (per-image OR per-caption)
 if per_caption:
     parent_class   = DF["class_name"].values
     parent_id      = DF["class_id"].values
@@ -672,7 +678,7 @@ if per_caption:
         "class_id":   [int(parent_id[i]) for i in cap_img_idx],
         "image_relpath": [parent_relpath[i] for i in cap_img_idx],
         "caption_short": cap_short,
-        "cosine_sim": cos_pairs_caps,    # one per caption
+        "cosine_sim": cos_pairs_caps,
         "anomaly": False,
         "anomaly_score": 0.0,
     })
@@ -686,13 +692,40 @@ else:
         "class_id": DF["class_id"].values,
         "image_relpath": DF["image_relpath"].values,
         "caption_short": cap_short,
-        "cosine_sim": cos_pairs_caps,    # one per image
+        "cosine_sim": cos_pairs_caps,
         "anomaly": False,
         "anomaly_score": 0.0,
     })
 
+# ---- attach ground-truth 'is_bad' in per-caption mode ----
+if per_caption:
+    counter = defaultdict(int)
+    aligned_is_bad = []
+    rels = df_txt2["image_relpath"].tolist()
+    for rel in rels:
+        k = counter[rel]
+        seq = BAD_GT.get(rel) or BAD_GT.get(Path(rel).name)
+        flag = int(seq[k]) if (seq and k < len(seq)) else 0
+        aligned_is_bad.append(flag)
+        counter[rel] += 1
+    df_txt2["is_bad"] = aligned_is_bad
+else:
+    df_txt2["is_bad"] = 0
+
+# ---- KPI counters for GT positives (evaluated-set vs all captions for selected images) ----
+if per_caption and BAD_GT:
+    gt_pos_eval = int(df_txt2["is_bad"].sum())   # positives among the captions we actually evaluate
+    selected_rels = set(df_txt2["image_relpath"])
+    gt_pos_all = 0
+    for rel in selected_rels:
+        seq = BAD_GT.get(rel) or BAD_GT.get(Path(rel).name)
+        if seq:
+            gt_pos_all += int(sum(seq))
+
+    k1, k2 = st.columns(2)
+
 # -----------------------------
-# Outlier detection orchestration
+# Outlier detection
 # -----------------------------
 def run_outlier_detector(X: np.ndarray) -> Tuple[np.ndarray, np.ndarray, str]:
     m = out_method
@@ -720,21 +753,17 @@ def run_outlier_detector(X: np.ndarray) -> Tuple[np.ndarray, np.ndarray, str]:
         )
     return labels.astype(np.int8, copy=False), scores.astype(np.float32, copy=False), m
 
-# Choose feature space + attach anomalies to the correct frame
 OUT_LABELS = None
 OUT_SCORES = None
 target_df = None
 if run_detection:
     if method_space.startswith("Raw"):
-        # Raw joint space: per-caption → J per caption; aggregate → J per image
         X_det = J
         target_df = df_txt2 if per_caption or (TXT.shape[0] == df_txt2.shape[0]) else df_img2
     elif "Image" in method_space:
-        X_det = P_IMG
-        target_df = df_img2
-    else:  # "Text"
-        X_det = P_TXT
-        target_df = df_txt2
+        X_det = P_IMG; target_df = df_img2
+    else:
+        X_det = P_TXT; target_df = df_txt2
 
     OUT_LABELS, OUT_SCORES, used_method = run_outlier_detector(X_det)
     target_df["anomaly"] = (OUT_LABELS == 1)
@@ -742,63 +771,242 @@ if run_detection:
 else:
     used_method = None
 
-# Clean mask & cleaned frames (respect which df had anomalies)
-def get_clean(df: pd.DataFrame) -> pd.DataFrame:
-    if remove_outliers and run_detection:
-        return df.loc[~df["anomaly"].astype(bool)].reset_index(drop=True)
-    return df
+# -----------------------------
+# KPIs
+# -----------------------------
+# number of GT positives visible in the *current* selection (after class/sample filters and caps_limit)
+pos_in_sel = int(df_txt2["is_bad"].sum()) if per_caption and ("is_bad" in df_txt2.columns) else None
 
-df_img2_clean = get_clean(df_img2)
-df_txt2_clean = get_clean(df_txt2)
-
-# KPIs + Download flags (from the target df if detection ran)
-leftKPI, rightKPI = st.columns(2)
+leftKPI, midKPI, rightKPI = st.columns(3)
 with leftKPI:
     st.metric("Total image samples", len(df_img2))
+with midKPI:
+    st.metric("GT positives in selection", pos_in_sel if pos_in_sel is not None else "—")
 with rightKPI:
     flagged = int(target_df["anomaly"].sum()) if (run_detection and target_df is not None) else 0
     st.metric("Outliers flagged", flagged)
 
-download_df = (target_df if (run_detection and target_df is not None) else df_txt2).copy()
-download_df = download_df[["image_relpath", "class_name", "class_id", "caption_short", "cosine_sim", "anomaly", "anomaly_score"]]
-st.download_button(
-    "Download outlier flags (CSV)",
-    data=download_df.to_csv(index=False).encode("utf-8"),
-    file_name=f"{dataset_name}_outlier_flags.csv",
-    mime="text/csv",
-)
+if per_caption and ("is_bad" in df_txt2.columns):
+    st.caption(f"GT positives computed over current subset and {'all captions' if caps_limit==0 else f'first {caps_limit} captions'}/image.")
+
+# -----------------------------
+# Authenticity metrics + Confusion Matrix + Examples + CSVs
+# -----------------------------
+def show_examples(title: str, df_src: pd.DataFrame, sample_idx: np.ndarray, max_n: int):
+    st.markdown(f"**{title}**")
+    if len(sample_idx) == 0:
+        st.caption("None.")
+        return
+    picks = sample_idx[:max_n]
+    cols = st.columns(min(3, len(picks)))
+    for i, idx in enumerate(picks):
+        row = df_src.iloc[idx]
+        img_path = IMAGES_DIR / row["image_relpath"]
+        with cols[i % len(cols)]:
+            if img_path.exists():
+                st.image(str(img_path), use_container_width=True)
+            st.caption(f"**{row['image_relpath']}**")
+            st.write(row["caption_short"] or "(no caption)")
+            st.code(f"score={row['anomaly_score']:.3f} • cosine={row['cosine_sim']:.3f}", language="text")
+
+metrics_text = None
+tp_idx = fp_idx = fn_idx = tn_idx = np.array([], dtype=int)
+
+if show_eval and run_detection and per_caption and ("is_bad" in df_txt2.columns):
+    from sklearn.metrics import precision_recall_fscore_support, confusion_matrix
+
+    y_true = df_txt2["is_bad"].astype(int).values
+    y_pred = df_txt2["anomaly"].astype(int).values
+
+    P, R, F1, _ = precision_recall_fscore_support(y_true, y_pred, average="binary", zero_division=0)
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0,1]).ravel()
+    metrics_text = f"Precision={P:.3f} • Recall={R:.3f} • F1={F1:.3f} • TP={tp} FP={fp} FN={fn} TN={tn}"
+
+    st.info(f"Positives in current subset: **{int(y_true.sum())}** "
+            f"(after class/sample filters and {'all' if caps_limit==0 else f'first {caps_limit}'} captions/image)")
+    st.success(f"Detection vs GT (per-caption): {metrics_text}")
+
+    # Confusion matrix heatmap
+    cm = np.array([[tn, fp],[fn, tp]], dtype=int)
+    fig_cm = go.Figure(
+        data=go.Heatmap(
+            z=cm,
+            x=["Pred 0 (clean)", "Pred 1 (outlier)"],
+            y=["True 0 (clean)", "True 1 (bad cap)"],
+            text=cm.astype(str),
+            texttemplate="%{text}",
+            hovertemplate="Row: %{y}<br>Col: %{x}<br>Count: %{z}<extra></extra>"
+        )
+    )
+    fig_cm.update_layout(
+        title="Confusion Matrix (Per-caption detection vs Ground Truth)",
+        xaxis_title="Prediction", yaxis_title="Ground Truth",
+        margin=dict(l=10, r=10, t=40, b=10), height=360
+    )
+    st.plotly_chart(fig_cm, use_container_width=True, theme="streamlit")
+
+    # Bucket indices
+    tp_idx = np.where((y_true == 1) & (y_pred == 1))[0]
+    fp_idx = np.where((y_true == 0) & (y_pred == 1))[0]
+    fn_idx = np.where((y_true == 1) & (y_pred == 0))[0]
+    tn_idx = np.where((y_true == 0) & (y_pred == 0))[0]
+
+    # Qualitative examples
+    with st.expander("Qualitative examples (images + captions)"):
+        show_examples("✅ True Positives (authentic outliers)", df_txt2, tp_idx, n_examples)
+        show_examples("❌ False Positives (flagged but clean)", df_txt2, fp_idx, n_examples)
+        show_examples("⚠️ False Negatives (missed bad captions)", df_txt2, fn_idx, n_examples)
+
+    # ----- CSV exports for all 4 buckets -----
+    def _csv_for(df_src: pd.DataFrame, idxs: np.ndarray, bucket: str) -> pd.DataFrame:
+        if len(idxs) == 0:
+            return pd.DataFrame(columns=[
+                "bucket","class_name","class_id","image_relpath","caption_short",
+                "cosine_sim","anomaly_score","x","y","class_color"
+            ])
+        sub = df_src.iloc[idxs].copy()
+        sub["bucket"] = bucket
+        sub["class_color"] = sub["class_name"].map(colors).fillna("")
+        return sub[[
+            "bucket","class_name","class_id","image_relpath","caption_short",
+            "cosine_sim","anomaly_score","x","y","class_color"
+        ]]
+
+    df_tp_csv = _csv_for(df_txt2, tp_idx, "TP")
+    df_fp_csv = _csv_for(df_txt2, fp_idx, "FP")
+    df_fn_csv = _csv_for(df_txt2, fn_idx, "FN")
+    df_tn_csv = _csv_for(df_txt2, tn_idx, "TN")
+    df_all_csv = pd.concat([df_tp_csv, df_fp_csv, df_fn_csv, df_tn_csv], ignore_index=True)
+
+    with st.expander("📥 Download detections (CSV)"):
+        st.download_button(
+            "Download ALL buckets (TP/FP/FN/TN)",
+            data=df_all_csv.to_csv(index=False),
+            file_name="detections_all_buckets.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+        c1,c2,c3,c4 = st.columns(4)
+        c1.download_button("TP.csv", df_tp_csv.to_csv(index=False), "tp.csv", "text/csv")
+        c2.download_button("FP.csv", df_fp_csv.to_csv(index=False), "fp.csv", "text/csv")
+        c3.download_button("FN.csv", df_fn_csv.to_csv(index=False), "fn.csv", "text/csv")
+        c4.download_button("TN.csv", df_tn_csv.to_csv(index=False), "tn.csv", "text/csv")
 
 # -----------------------------
 # Plotting helpers
 # -----------------------------
-def _outlier_trace_from_df(df: pd.DataFrame, name="Outliers"):
-    """Create a white X outlier trace with rich hover content from df rows where anomaly==True."""
+def _auth_traces_for_text(df: pd.DataFrame):
+    """
+    Return Plotly traces for text points authenticity when available.
+    - True outliers (is_bad==1 & anomaly==1): red X
+    - False positives (is_bad==0 & anomaly==1): white X
+    - Missed bad (is_bad==1 & anomaly==0): orange diamond-open
+    """
+    traces = []
+    if "is_bad" not in df.columns or "anomaly" not in df.columns:
+        return traces
+
+    # True outliers
+    sel = (df["is_bad"].astype(int) == 1) & (df["anomaly"].astype(bool))
+    true_out = df[sel]
+    if not true_out.empty:
+        txt = ("🖼 %{customdata[0]}<br>📝 %{customdata[1]}<br>"
+               "score=%{customdata[3]:.3f}")
+        traces.append(go.Scatter(
+            x=true_out["x"], y=true_out["y"], mode="markers", name="True outliers",
+            marker=dict(symbol="x", size=10, color="red", line=dict(width=2, color="red")),
+            customdata=np.stack([
+                true_out["image_relpath"].astype(str).values,
+                true_out["caption_short"].fillna("").astype(str).values,
+                true_out["cosine_sim"].astype(float).values,
+                true_out["anomaly_score"].astype(float).values
+            ], axis=1),
+            hovertemplate=txt + "<extra>True outlier</extra>",
+            showlegend=True,
+        ))
+
+    # False positives
+    sel = (df["is_bad"].astype(int) == 0) & (df["anomaly"].astype(bool))
+    fp = df[sel]
+    if not fp.empty:
+        txt = ("🖼 %{customdata[0]}<br>📝 %{customdata[1]}<br>"
+               "score=%{customdata[3]:.3f}")
+        traces.append(go.Scatter(
+            x=fp["x"], y=fp["y"], mode="markers", name="False positives",
+            marker=dict(symbol="x", size=10, color="white", line=dict(width=2, color="white")),
+            customdata=np.stack([
+                fp["image_relpath"].astype(str).values,
+                fp["caption_short"].fillna("").astype(str).values,
+                fp["cosine_sim"].astype(float).values,
+                fp["anomaly_score"].astype(float).values
+            ], axis=1),
+            hovertemplate=txt + "<extra>False positive</extra>",
+            showlegend=True,
+        ))
+
+    # Missed bad captions (FN)
+    sel = (df["is_bad"].astype(int) == 1) & (~df["anomaly"].astype(bool))
+    fn = df[sel]
+    if not fn.empty:
+        txt = ("🖼 %{customdata[0]}<br>📝 %{customdata[1]}<br>"
+               "cosine=%{customdata[2]:.3f}")
+        traces.append(go.Scatter(
+            x=fn["x"], y=fn["y"], mode="markers", name="Missed bad captions",
+            marker=dict(symbol="diamond-open", size=9, line=dict(width=2, color="orange")),
+            customdata=np.stack([
+                fn["image_relpath"].astype(str).values,
+                fn["caption_short"].fillna("").astype(str).values,
+                fn["cosine_sim"].astype(float).values
+            ], axis=1),
+            hovertemplate=txt + "<extra>False negative</extra>",
+            showlegend=True,
+        ))
+    return traces
+
+def _outlier_traces_by_class(df: pd.DataFrame, name_prefix="Outlier"):
+    """
+    Build per-class outlier 'X' traces so that outliers keep the same color as their class.
+    Used when authenticity overlays are OFF.
+    """
     out = df[df["anomaly"].astype(bool)].copy()
     if out.empty:
-        return None
-    # build rich hover text
-    txt = (
-        "🖼 %{customdata[0]}<br>"  # image_relpath
-        "📝 %{customdata[1]}<br>"
-        "score=%{customdata[3]:.3f}"
-    )
-    return go.Scatter(
-        x=out["x"], y=out["y"], mode="markers", name=name,
-        marker=dict(symbol="x", size=outlier_size, color="white",
-                    line=dict(width=outlier_width, color="white")),
-        customdata=np.stack([
-            out["image_relpath"].astype(str).values,
-            out["caption_short"].fillna("").astype(str).values,
-            out["cosine_sim"].astype(float).values,
-            out["anomaly_score"].astype(float).values
-        ], axis=1),
-        hovertemplate=txt + "<extra>Outlier</extra>",
-        showlegend=True,
-    )
+        return []
 
-def _scatter_with_outliers(df: pd.DataFrame, title: str):
-    # include cosine_sim in hover
-    hover_cols = [c for c in ["class_id", "image_relpath", "caption_short", "cosine_sim"] if c in df.columns]
+    traces = []
+    for cls, g in out.groupby("class_name", sort=False):
+        cls_color = colors.get(cls, None)
+
+        custom = np.stack([
+            g["class_name"].astype(str).values,
+            g["image_relpath"].astype(str).values,
+            g["caption_short"].fillna("").astype(str).values,
+            g["cosine_sim"].astype(float).values,
+            g["anomaly_score"].astype(float).values
+        ], axis=1)
+
+        hover = (
+            "class=%{customdata[0]}<br>"
+            "🖼 %{customdata[1]}<br>"
+            "📝 %{customdata[2]}<br>"
+            "cosine=%{customdata[3]:.3f}<br>"
+            "score=%{customdata[4]:.3f}<extra></extra>"
+        )
+
+        traces.append(go.Scatter(
+            x=g["x"], y=g["y"], mode="markers", name=f"{name_prefix} · {cls}",
+            marker=dict(
+                symbol="x", size=outlier_size,
+                color=cls_color,                      # class color
+                line=dict(width=outlier_width, color=cls_color)
+            ),
+            customdata=custom,
+            hovertemplate=hover,
+            showlegend=True,
+        ))
+    return traces
+
+def _scatter_with_outliers(df: pd.DataFrame, title: str, authenticity_for_text: bool = False):
+    hover_cols = [c for c in ["class_name", "class_id", "image_relpath", "caption_short", "cosine_sim"] if c in df.columns]
     mask = df["anomaly"].astype(bool) if "anomaly" in df.columns else pd.Series(False, index=df.index)
 
     base = px.scatter(
@@ -809,9 +1017,12 @@ def _scatter_with_outliers(df: pd.DataFrame, title: str):
     )
     base.update_traces(marker=dict(size=6, line=dict(width=0)))
 
-    out_trace = _outlier_trace_from_df(df)
-    if out_trace is not None:
-        base.add_trace(out_trace)
+    if not authenticity_for_text:
+        for tr in _outlier_traces_by_class(df, name_prefix="Outlier"):
+            base.add_trace(tr)
+    else:
+        for tr in _auth_traces_for_text(df):
+            base.add_trace(tr)
 
     base.update_layout(margin=dict(l=10, r=10, t=40, b=10))
     return base
@@ -822,12 +1033,15 @@ def _scatter_with_outliers(df: pd.DataFrame, title: str):
 left, right = st.columns(2, gap="large")
 with left:
     st.subheader(f"[{dataset_name}] Image embeddings • {method}" + (" • CLEAN" if show_clean_only else ""))
-    st.plotly_chart(_scatter_with_outliers(df_img2_clean if show_clean_only else df_img2, f"Image • {method}"),
+    st.plotly_chart(_scatter_with_outliers(df_img2 if not show_clean_only else df_img2[df_img2["anomaly"]==False],
+                                           f"Image • {method}", authenticity_for_text=False),
                     use_container_width=True, theme="streamlit")
 with right:
     title_txt = "Text (per-caption)" if per_caption else "Text (per-image)"
     st.subheader(f"[{dataset_name}] {title_txt} embeddings • {method}" + (" • CLEAN" if show_clean_only else ""))
-    st.plotly_chart(_scatter_with_outliers(df_txt2_clean if show_clean_only else df_txt2, f"Text • {method}"),
+    authenticity = overlay_auth and per_caption and ("is_bad" in df_txt2.columns)
+    st.plotly_chart(_scatter_with_outliers(df_txt2 if not show_clean_only else df_txt2[df_txt2["anomaly"]==False],
+                                           f"Text • {method}", authenticity_for_text=authenticity),
                     use_container_width=True, theme="streamlit")
 
 # -----------------------------
@@ -839,7 +1053,7 @@ fig_joint = go.Figure()
 # Draw connection lines
 if per_caption:
     rel_to_index = {r: i for i, r in enumerate(df_img2["image_relpath"])}
-    src_df = df_txt2_clean if show_clean_only else df_txt2
+    src_df = df_txt2 if not show_clean_only else df_txt2[df_txt2["anomaly"]==False]
     for j in range(len(src_df)):
         rel = src_df.iloc[j]["image_relpath"]
         i = rel_to_index.get(rel, None)
@@ -854,7 +1068,7 @@ if per_caption:
             hoverinfo="skip"
         ))
 else:
-    idx_iter = np.where((df_txt2_clean["x"].notna()))[0] if show_clean_only else range(len(DF))
+    idx_iter = np.where((df_txt2["x"].notna()))[0] if not show_clean_only else np.where((df_txt2["anomaly"]==False).values)[0]
     for i in idx_iter:
         fig_joint.add_trace(go.Scatter(
             x=[df_img2.iloc[i]["x"], df_txt2.iloc[i]["x"]],
@@ -885,38 +1099,39 @@ def _base_marker(df, name):
         )
     )
 
-fig_joint.add_trace(_base_marker(df_img2_clean if show_clean_only else df_img2, "Image"))
-fig_joint.add_trace(_base_marker(df_txt2_clean if show_clean_only else df_txt2,
-                                 "Text (per-caption)" if per_caption else "Text"))
+fig_joint.add_trace(_base_marker(df_img2, "Image"))
+fig_joint.add_trace(_base_marker(df_txt2, "Text (per-caption)" if per_caption else "Text"))
 
-# Outlier overlays on joint plot (for whichever side has anomalies)
-ot_img = _outlier_trace_from_df(df_img2_clean if show_clean_only else df_img2, "Outliers")
-ot_txt = _outlier_trace_from_df(df_txt2_clean if show_clean_only else df_txt2, "Outliers")
-if ot_img is not None: fig_joint.add_trace(ot_img)
-if ot_txt is not None: fig_joint.add_trace(ot_txt)
+# Overlays on joint plot
+if overlay_auth and per_caption and ("is_bad" in df_txt2.columns):
+    for tr in _auth_traces_for_text(df_txt2):
+        fig_joint.add_trace(tr)
+else:
+    for tr in _outlier_traces_by_class(df_img2, "Outlier"):
+        fig_joint.add_trace(tr)
+    for tr in _outlier_traces_by_class(df_txt2, "Outlier"):
+        fig_joint.add_trace(tr)
 
 fig_joint.update_layout(margin=dict(l=10, r=10, t=40, b=10))
 st.plotly_chart(fig_joint, use_container_width=True, theme="streamlit")
 
 # -----------------------------
-# Optional: 2D projection of blended joint vectors (one point per item)
+# Single-view: Joint-blend projection (uses α above)
 # -----------------------------
 with st.expander("Single-view: Joint-blend projection (uses α above)"):
     PJ = project_2d(J, method, int(random_state), int(tsne_perplexity), int(umap_neighbors), float(umap_min_dist))
 
     if per_caption:
-        anomaly_src = (df_txt2 if not show_clean_only else df_txt2_clean)
-        anom_vals = anomaly_src["anomaly"].astype(bool).values if run_detection else np.zeros(len(PJ), bool)
-        score_vals = anomaly_src["anomaly_score"].astype(float).values if run_detection else np.zeros(len(PJ), float)
+        source_df = df_txt2
+        anom_vals = source_df["anomaly"].astype(bool).values if run_detection else np.zeros(len(PJ), bool)
+        score_vals = source_df["anomaly_score"].astype(float).values if run_detection else np.zeros(len(PJ), float)
         cap_short_j = [ (c[:120] + "…") if len(c) > 120 else c for c in cap_texts ]
         cos_sim_j = cos_pairs_caps
         classes_j = [DF.iloc[i]["class_name"] for i in cap_img_idx]
         class_id_j = [int(DF.iloc[i]["class_id"]) for i in cap_img_idx]
         rels_j = [DF.iloc[i]["image_relpath"] for i in cap_img_idx]
     else:
-        # choose anomaly source depending on detection space
         source_df = df_txt2 if (method_space.startswith("Raw") or "Text" in method_space) else df_img2
-        source_df = (source_df if not show_clean_only else get_clean(source_df))
         anom_vals = source_df["anomaly"].astype(bool).values if run_detection else np.zeros(len(PJ), bool)
         score_vals = source_df["anomaly_score"].astype(float).values if run_detection else np.zeros(len(PJ), float)
         first_caps = [ (caps[0] if caps else "") for caps in cap_payload ]
@@ -938,16 +1153,16 @@ with st.expander("Single-view: Joint-blend projection (uses α above)"):
     })
 
     def _scatter(df: pd.DataFrame, title: str):
-        hover_cols = [c for c in ["class_id","image_relpath","caption_short","cosine_sim"] if c in df.columns]
+        hover_cols = [c for c in ["class_name","class_id","image_relpath","caption_short","cosine_sim"] if c in df.columns]
         mask = df["anomaly"].astype(bool)
         base = px.scatter(df[~mask], x="x", y="y", color="class_name",
                           hover_data=hover_cols, title=title,
+                          color_discrete_map=colors,
                           opacity=0.85, render_mode="webgl")
         base.update_traces(marker=dict(size=6, line=dict(width=0)))
 
-        out_trace = _outlier_trace_from_df(df)
-        if out_trace is not None:
-            base.add_trace(out_trace)
+        for tr in _outlier_traces_by_class(df):
+            base.add_trace(tr)
 
         base.update_layout(margin=dict(l=10, r=10, t=40, b=10))
         return base
@@ -980,5 +1195,4 @@ if st.button("Top-5 closest texts for this image (cosine)"):
     })
     st.dataframe(df_sim, use_container_width=True)
 
-st.caption("Per-caption mode shows one point per caption for Text and Joint; hover on outliers shows the actual caption, image name, cosine similarity, and the detector's outlier score.")
-# -----------------------------
+st.caption("Per-caption mode shows one point per caption for Text and Joint; evaluation compares detector outliers vs bad_caption_gt.json (authenticity).")
