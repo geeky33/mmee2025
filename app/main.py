@@ -1,8 +1,8 @@
 # app/main.py
 # MMEE Embedding Viewer (uses utils/clip_utils)
 # Streamlit app: projections (PCA / t-SNE / UMAP) for IMAGE and TEXT embeddings
-# + Outlier detection (multiple methods), removal, and clean-view UI
-# + Authenticity evaluation vs injected bad captions (Precision/Recall/F1 + Confusion Matrix + Examples)
+# + Outlier detection (class-wise Isolation Forest / LOF / kNN / DBSCAN)
+# + Authenticity evaluation vs injected bad captions (Precision/Recall/F1 + Confusion Matrix + Sanity Tables)
 #
 # Usage:
 #   streamlit run app/main.py
@@ -18,6 +18,16 @@ import plotly.graph_objects as go
 from scipy.linalg import orthogonal_procrustes
 from importlib import import_module
 from collections import defaultdict
+
+# NEW: ML utils for metrics, CV and fusion scorer
+from sklearn.model_selection import StratifiedKFold, cross_val_predict
+from sklearn.metrics import (
+    precision_recall_curve, roc_curve, auc, average_precision_score,
+    precision_recall_fscore_support, confusion_matrix
+)
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
 
 # Silence optional QuickGELU warning if you see it
 import warnings
@@ -37,12 +47,10 @@ _compute_text_embeddings  = _clip.compute_text_embeddings
 cosine_similarity         = _clip.cosine_similarity
 joint_weighted_embeddings = getattr(_clip, "joint_weighted_embeddings", None)
 
-# try to import projection + iforest helpers from utils
+# try to import projection helpers from utils
 pca_project    = getattr(_clip, "pca_project", None)
 tsne_project   = getattr(_clip, "tsne_project", None)
 umap_project   = getattr(_clip, "umap_project", None)
-iforest_detect = getattr(_clip, "iforest_detect", None)
-iforest_on_raw = getattr(_clip, "iforest_on_raw", None)
 
 # provide local fallbacks if missing (so the app still runs)
 if pca_project is None:
@@ -73,26 +81,6 @@ if umap_project is None:
         r3 = umap.UMAP(n_components=3, n_neighbors=int(n_neighbors), min_dist=float(min_dist),
                        metric="cosine", random_state=int(random_state))
         return r2.fit_transform(X), r3.fit_transform(X)
-
-if iforest_detect is None or iforest_on_raw is None:
-    try:
-        from sklearn.ensemble import IsolationForest as _IF
-    except Exception:
-        _IF = None
-    def iforest_detect(X, contamination=0.05, n_estimators=300,
-                       max_samples="auto", random_state=42, return_model=False):
-        if _IF is None:
-            raise RuntimeError("scikit-learn IsolationForest not available")
-        
-        X = np.asarray(X, dtype=np.float32, order="C")
-        model = _IF(n_estimators=n_estimators, contamination=contamination,
-                    max_samples=max_samples, random_state=random_state, n_jobs=-1)
-        model.fit(X)
-        scores = (-model.score_samples(X)).astype(np.float32, copy=False)  # higher = more anomalous
-        labels = (model.predict(X) == -1).astype(np.int8, copy=False)
-        return (labels, scores, model) if return_model else (labels, scores)
-    def iforest_on_raw(E, **kwargs):
-        return iforest_detect(E, **kwargs)
 
 # ensure joint blending exists even if utils was older
 if joint_weighted_embeddings is None:
@@ -422,43 +410,48 @@ with st.sidebar:
         index=0
     )
 
-    st.header("Outlier method")
+    st.header("Outlier method (per-class)")
     out_method = st.selectbox(
         "Choose method",
-        ["Isolation Forest","kNN Distance (Quantile)","LOF (Local Outlier Factor)",
-         "DBSCAN (noise)","Mahalanobis (robust)","PCA Reconstruction Error","One-Class SVM"],
+        ["Isolation Forest","kNN Distance (Quantile)","LOF (Local Outlier Factor)","DBSCAN (noise)"],
         index=0
     )
     with st.container(border=True):
-        st.caption("Method parameters")
-        contamination = st.slider("Contamination / ν", 0.0, 0.2, 0.03, step=0.005)
+        st.caption("Method parameters (applied per class)")
+        contamination = st.slider("Contamination / share of outliers", 0.0, 0.3, 0.03, step=0.005)
         if out_method == "kNN Distance (Quantile)":
             knn_k = st.slider("k (neighbors)", 2, 50, 10)
             knn_q = st.slider("Quantile", 0.80, 0.999, 0.98)
         if out_method == "LOF (Local Outlier Factor)":
             lof_k = st.slider("n_neighbors", 5, 100, 20)
         if out_method == "DBSCAN (noise)":
-            db_eps = st.slider("eps", 0.05, 5.0, 0.8)
+            db_eps_auto = st.checkbox("Auto eps from class kNN distances", value=True)
+            db_eps = st.slider("eps (ignored if auto)", 0.05, 5.0, 0.8)
             db_min = st.slider("min_samples", 3, 100, 10)
-        if out_method == "Mahalanobis (robust)":
-            robust = st.checkbox("Robust (MinCovDet)", value=True)
-        if out_method == "PCA Reconstruction Error":
-            pca_nc = st.text_input("n_components (int or fraction)", value="0.9")
-        if out_method == "One-Class SVM":
-            ocsvm_kernel = st.selectbox("kernel", ["rbf", "linear", "poly", "sigmoid"], index=0)
-            ocsvm_gamma = st.selectbox("gamma", ["scale", "auto"], index=0)
+
+    st.header("Per-class combine")
+    combine_mode = st.radio("Merge multiple class detectors into a single prediction",
+                            ["Union (recall mode)", "Intersection (precision mode)"], index=0)
+
+    st.header("Validation / Targets")
+    target_recall   = st.slider("Target recall (calibration)", 0.10, 0.95, 0.70, 0.05)
+    min_precision   = st.slider("Min precision (display goal)", 0.05, 0.80, 0.20, 0.05)
+    valid_frac      = st.slider("Validation split (frozen)", 0.05, 0.50, 0.20, 0.05)
+
+    st.header("Fusion scorer")
+    use_fusion = st.checkbox("Enable feature-fusion scorer (LR + CV)", value=True)
+    cv_folds   = st.slider("CV folds", 3, 10, 5)
 
     st.header("Apply / Display")
     run_detection   = st.checkbox("Run detection", value=False)
-    remove_outliers = st.checkbox("Remove outliers (show clean data)", value=False)
     show_clean_only = st.checkbox("Show only clean data in plots", value=False)
     outlier_size    = st.slider("Outlier marker size", 6, 20, 10, help="Size of the X markers")
     outlier_width   = st.slider("Outlier stroke width", 1, 5, 2)
 
     st.header("Evaluation (vs GT)")
-    show_eval = st.checkbox("Show authenticity metrics & examples", value=True)
+    show_eval = st.checkbox("Show authenticity metrics & confusion matrix", value=True)
     overlay_auth = st.checkbox("Overlay authenticity on plots", value=True)
-    n_examples = st.slider("Examples per bucket (TP/FP/FN)", 1, 10, 3)
+    topN_sanity = st.slider("Sanity tables: top-N by score", 3, 50, 10)
 
 # -----------------------------
 # Load dataset
@@ -531,7 +524,6 @@ st.success(f"[{dataset_name}] Using {len(DF)} images across {DF['class_name'].nu
 ALL_CAPS = captions_for_images([Path(p) for p in DF["image_path"].tolist()], CAP_MAP, IMAGES_DIR)
 caps_available = sum(1 for c in ALL_CAPS if c)
 st.caption(f"Captions available for {caps_available}/{len(ALL_CAPS)} selected images.")
-# ---- Tell the user whether we’re using all captions or only first K ----
 if per_caption:
     sel_note = "all captions per image" if caps_limit == 0 else f"first {caps_limit} captions/image"
     st.info(f"GT positives computed over current subset and {sel_note}.")
@@ -712,51 +704,177 @@ if per_caption:
 else:
     df_txt2["is_bad"] = 0
 
-# ---- KPI counters for GT positives (evaluated-set vs all captions for selected images) ----
-if per_caption and BAD_GT:
-    gt_pos_eval = int(df_txt2["is_bad"].sum())   # positives among the captions we actually evaluate
-    selected_rels = set(df_txt2["image_relpath"])
-    gt_pos_all = 0
-    for rel in selected_rels:
-        seq = BAD_GT.get(rel) or BAD_GT.get(Path(rel).name)
-        if seq:
-            gt_pos_all += int(sum(seq))
+# ---- Frozen validation split (deterministic) ----
+def _frozen_split_mask(
+    df: pd.DataFrame,
+    frac: float,
+    key_cols=("image_relpath", "caption_short"),
+    seed_str: str = "MMEE_v1",
+) -> np.ndarray:
+    """
+    Return a boolean mask selecting ~frac of rows, deterministically,
+    by hashing key columns + a seed string.
+    """
+    n = len(df)
+    if frac <= 0:
+        return np.zeros(n, dtype=bool)
+    if frac >= 1:
+        return np.ones(n, dtype=bool)
 
-    k1, k2 = st.columns(2)
+    # Build a stable per-row key and hash it to 32-bit integers
+    def row_key(i: int) -> str:
+        parts = [seed_str]
+        for k in key_cols:
+            parts.append(str(df.iloc[i][k]) if k in df.columns else "")
+        return "|".join(parts)
+
+    it = (
+        int(hashlib.sha1(row_key(i).encode("utf-8")).hexdigest()[:8], 16)
+        for i in range(n)
+    )
+    h = np.fromiter(it, dtype=np.uint32, count=n)
+
+    # Map hashes to [0,1) and threshold by frac
+    r = (h % 100_000_003) / 100_000_003.0
+    return r < float(frac)
+
+VAL_MASK = _frozen_split_mask(df_txt2, valid_frac) if per_caption else np.zeros(len(df_txt2), dtype=bool)
+TRAIN_MASK = ~VAL_MASK
 
 # -----------------------------
-# Outlier detection
+# ==== CLASS-WISE OUTLIER DETECTORS ====
 # -----------------------------
-def run_outlier_detector(X: np.ndarray) -> Tuple[np.ndarray, np.ndarray, str]:
-    m = out_method
-    if m == "Isolation Forest":
-        labels, scores = iforest_detect(X, contamination=float(contamination))
-    elif m == "kNN Distance (Quantile)":
-        labels, scores = _clip.knn_quantile_detect(X, k=int(knn_k), quantile=float(knn_q))
-    elif m == "LOF (Local Outlier Factor)":
-        labels, scores = _clip.lof_detect(X, n_neighbors=int(lof_k), contamination=float(contamination))
-    elif m == "DBSCAN (noise)":
-        labels, scores = _clip.dbscan_detect(X, eps=float(db_eps), min_samples=int(db_min))
-    elif m == "Mahalanobis (robust)":
-        labels, scores = _clip.mahalanobis_detect(X, contamination=float(contamination), robust=bool(robust))
-    elif m == "PCA Reconstruction Error":
-        try:
-            val = float(pca_nc)
-            nc = val if 0 < val < 1 else int(val)
-        except Exception:
-            nc = 0.9
-        labels, scores = _clip.pca_recon_error_detect(X, n_components=nc, contamination=float(contamination))
-    else:  # One-Class SVM
-        labels, scores = _clip.ocsvm_detect(
-            X, nu=float(contamination) if contamination > 0 else 0.01,
-            kernel=str(ocsvm_kernel), gamma=str(ocsvm_gamma)
-        )
-    return labels.astype(np.int8, copy=False), scores.astype(np.float32, copy=False), m
+from sklearn.ensemble import IsolationForest
+from sklearn.neighbors import LocalOutlierFactor, NearestNeighbors
+from sklearn.cluster import DBSCAN
 
+def _ensure_2d(X):
+    X = np.asarray(X, dtype=np.float32)
+    if X.ndim == 1:
+        X = X[:, None]
+    return X
+
+def iforest_single_class(X, contamination=0.05, n_estimators=300, random_state=42):
+    X = _ensure_2d(X)
+    model = IsolationForest(
+        n_estimators=n_estimators, contamination=float(contamination),
+        random_state=int(random_state), n_jobs=-1, max_samples="auto"
+    )
+    model.fit(X)
+    scores = -model.score_samples(X).astype(np.float32)  # higher = more anomalous
+    labels = (model.predict(X) == -1).astype(np.int8)
+    return labels, scores
+
+def lof_single_class(X, n_neighbors=20, contamination=0.05):
+    X = _ensure_2d(X)
+    nn = min(n_neighbors, max(2, len(X) - 1))
+    lof = LocalOutlierFactor(
+        n_neighbors=nn, contamination=float(contamination),
+        novelty=False, n_jobs=-1, metric="minkowski"
+    )
+    labels_raw = lof.fit_predict(X)             # -1 outlier, 1 inlier
+    labels = (labels_raw == -1).astype(np.int8)
+    scores = (-lof.negative_outlier_factor_).astype(np.float32)  # higher = more anomalous
+    return labels, scores
+
+def knn_quantile_single_class(X, k=10, quantile=0.98):
+    X = _ensure_2d(X)
+    k_eff = min(k, max(1, len(X) - 1))
+    nbrs = NearestNeighbors(n_neighbors=k_eff + 1, n_jobs=-1, metric="minkowski").fit(X)
+    dists, _ = nbrs.kneighbors(X)
+    kth = dists[:, -1].astype(np.float32)       # distance to k-th neighbor
+    thr = np.quantile(kth, float(quantile)) if len(kth) else np.inf
+    labels = (kth >= thr).astype(np.int8)
+    scores = kth
+    return labels, scores
+
+def dbscan_single_class(X, eps=None, min_samples=10, k_for_eps=10, quantile_for_eps=0.95):
+    X = _ensure_2d(X)
+    n = len(X)
+    if n <= 1:
+        return np.zeros(n, np.int8), np.zeros(n, np.float32)
+
+    if eps is None:
+        k_eff = min(k_for_eps, max(1, n - 1))
+        nbrs = NearestNeighbors(n_neighbors=k_eff + 1, n_jobs=-1).fit(X)
+        dists, _ = nbrs.kneighbors(X)
+        kth = dists[:, -1]
+        eps = float(np.quantile(kth, float(quantile_for_eps)))
+
+    ms = min(int(min_samples), max(2, n))
+    clustering = DBSCAN(eps=float(eps), min_samples=ms, n_jobs=-1).fit(X)
+    labels = (clustering.labels_ == -1).astype(np.int8)  # -1 = noise => outlier
+
+    try:
+        k_eff = min(10, max(1, n - 1))
+        nbrs = NearestNeighbors(n_neighbors=k_eff + 1, n_jobs=-1).fit(X)
+        dists, _ = nbrs.kneighbors(X)
+        kth = dists[:, -1].astype(np.float32)
+        scores = kth
+    except Exception:
+        scores = labels.astype(np.float32)
+    return labels, scores
+
+def run_classwise_detector(X: np.ndarray, labels_series: pd.Series, method_name: str,
+                           contamination: float, params: dict) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Run detector per class_name, return matrices of per-class labels/scores (N x C).
+    """
+    classes = labels_series.unique().tolist()
+    N = X.shape[0]
+    Lmat = []
+    Smat = []
+
+    for cls in classes:
+        idx = (labels_series == cls).values
+        if idx.sum() < 5:
+            y_local = np.zeros(idx.sum(), np.int8)
+            s_local = np.zeros(idx.sum(), np.float32)
+        else:
+            Xc = X[idx]
+            if method_name == "Isolation Forest":
+                y_local, s_local = iforest_single_class(Xc, contamination=contamination)
+            elif method_name == "kNN Distance (Quantile)":
+                y_local, s_local = knn_quantile_single_class(
+                    Xc, k=int(params.get("knn_k", 10)), quantile=float(params.get("knn_q", 0.98))
+                )
+            elif method_name == "LOF (Local Outlier Factor)":
+                y_local, s_local = lof_single_class(
+                    Xc, n_neighbors=int(params.get("lof_k", 20)), contamination=contamination
+                )
+            elif method_name == "DBSCAN (noise)":
+                eps_val = None if params.get("db_eps_auto", False) else float(params.get("db_eps", 0.8))
+                y_local, s_local = dbscan_single_class(
+                    Xc, eps=eps_val, min_samples=int(params.get("db_min", 10)),
+                    k_for_eps=10, quantile_for_eps=0.95
+                )
+            else:
+                raise ValueError(f"Unsupported method for classwise: {method_name}")
+
+            # normalize per-class scores for comparability
+            if len(s_local) > 1:
+                m = float(np.mean(s_local)); s = float(np.std(s_local)) or 1.0
+                s_local = (s_local - m) / s
+
+        # scatter back to N slots
+        s_full = np.zeros(N, dtype=np.float32)
+        y_full = np.zeros(N, dtype=np.int8)
+        s_full[idx] = s_local
+        y_full[idx] = y_local
+        Smat.append(s_full); Lmat.append(y_full)
+
+    return np.stack(Lmat, axis=1), np.stack(Smat, axis=1)  # [N,C], [N,C]
+
+# -----------------------------
+# Outlier detection (class-wise with combine)
+# -----------------------------
 OUT_LABELS = None
 OUT_SCORES = None
 target_df = None
+used_method = None
+
 if run_detection:
+    # choose feature space
     if method_space.startswith("Raw"):
         X_det = J
         target_df = df_txt2 if per_caption or (TXT.shape[0] == df_txt2.shape[0]) else df_img2
@@ -765,16 +883,34 @@ if run_detection:
     else:
         X_det = P_TXT; target_df = df_txt2
 
-    OUT_LABELS, OUT_SCORES, used_method = run_outlier_detector(X_det)
+    params = {
+        "knn_k": knn_k if "knn_k" in locals() else 10,
+        "knn_q": knn_q if "knn_q" in locals() else 0.98,
+        "lof_k": lof_k if "lof_k" in locals() else 20,
+        "db_eps_auto": db_eps_auto if "db_eps_auto" in locals() else True,
+        "db_eps": db_eps if "db_eps" in locals() else 0.8,
+        "db_min": db_min if "db_min" in locals() else 10,
+    }
+
+    # per-class run
+    Lmat, Smat = run_classwise_detector(
+        X_det, target_df["class_name"], out_method, float(contamination), params
+    )
+    # combine classes → one prediction per sample
+    if combine_mode.startswith("Union"):
+        OUT_LABELS = (Lmat.max(axis=1)).astype(np.int8)          # any class flags → outlier
+        OUT_SCORES = (Smat.max(axis=1)).astype(np.float32)       # strongest class score
+    else:
+        OUT_LABELS = (Lmat.min(axis=1)).astype(np.int8)          # all class flags (rare)
+        OUT_SCORES = (Smat.mean(axis=1)).astype(np.float32)      # conservative score
+
     target_df["anomaly"] = (OUT_LABELS == 1)
     target_df["anomaly_score"] = OUT_SCORES
-else:
-    used_method = None
+    used_method = out_method
 
 # -----------------------------
 # KPIs
 # -----------------------------
-# number of GT positives visible in the *current* selection (after class/sample filters and caps_limit)
 pos_in_sel = int(df_txt2["is_bad"].sum()) if per_caption and ("is_bad" in df_txt2.columns) else None
 
 leftKPI, midKPI, rightKPI = st.columns(3)
@@ -790,59 +926,90 @@ if per_caption and ("is_bad" in df_txt2.columns):
     st.caption(f"GT positives computed over current subset and {'all captions' if caps_limit==0 else f'first {caps_limit} captions'}/image.")
 
 # -----------------------------
-# Authenticity metrics + Confusion Matrix + Examples + CSVs
+# Fusion scorer (optional)
 # -----------------------------
-def show_examples(title: str, df_src: pd.DataFrame, sample_idx: np.ndarray, max_n: int):
-    st.markdown(f"**{title}**")
-    if len(sample_idx) == 0:
-        st.caption("None.")
-        return
-    picks = sample_idx[:max_n]
-    cols = st.columns(min(3, len(picks)))
-    for i, idx in enumerate(picks):
-        row = df_src.iloc[idx]
-        img_path = IMAGES_DIR / row["image_relpath"]
-        with cols[i % len(cols)]:
-            if img_path.exists():
-                st.image(str(img_path), use_container_width=True)
-            st.caption(f"**{row['image_relpath']}**")
-            st.write(row["caption_short"] or "(no caption)")
-            st.code(f"score={row['anomaly_score']:.3f} • cosine={row['cosine_sim']:.3f}", language="text")
+def _feature_table_for_fusion(df_txt2: pd.DataFrame,
+                              IMG: np.ndarray, TXT: np.ndarray,
+                              per_caption: bool, cap_img_idx: list[int] | None):
+    # cosine already present
+    cos = df_txt2["cosine_sim"].astype(float).fillna(0.0).to_numpy()
+    # residual + odd-one-out
+    if per_caption and cap_img_idx is not None and len(cap_img_idx) == TXT.shape[0]:
+        Irep = IMG[np.asarray(cap_img_idx, dtype=int), :]
+        resid = np.linalg.norm(Irep - TXT, axis=1).astype(np.float32)
+        from collections import defaultdict
+        by_img = defaultdict(list)
+        for j, i in enumerate(cap_img_idx): by_img[i].append(cos[j])
+        odd = np.zeros_like(cos, dtype=np.float32)
+        pos = 0
+        for i, vals in by_img.items():
+            v = np.asarray(vals, dtype=np.float32); mu, sd = float(np.mean(v)), float(np.std(v) + 1e-6)
+            k = len(v); odd[pos:pos+k] = np.abs((v - mu) / sd); pos += k
+    else:
+        resid = np.linalg.norm(IMG - TXT, axis=1).astype(np.float32)
+        odd = np.abs((cos - np.mean(cos)) / (np.std(cos) + 1e-6)).astype(np.float32)
+    clen = df_txt2["caption_short"].fillna("").map(len).astype(np.float32).to_numpy()
+    det = df_txt2["anomaly_score"].astype(float).to_numpy() if "anomaly_score" in df_txt2.columns else np.zeros_like(cos)
+    Xf = np.stack([cos, resid, odd, clen, det], axis=1).astype(np.float32)
+    return Xf
 
+fusion_info = None
+if run_detection and use_fusion and per_caption and ("is_bad" in df_txt2.columns):
+    y_all = df_txt2["is_bad"].astype(int).to_numpy()
+    Xf_all = _feature_table_for_fusion(df_txt2, IMG if not per_caption else (IMG if len(cap_img_idx)==0 else IMG), TXT, per_caption, cap_img_idx if per_caption else None)
+    # CV on validation subset to calibrate threshold
+    if VAL_MASK.any():
+        pipe = Pipeline([("scaler", StandardScaler()), ("lr", LogisticRegression(max_iter=1000, class_weight="balanced"))])
+        skf = StratifiedKFold(n_splits=int(cv_folds), shuffle=True, random_state=42)
+        prob_val = cross_val_predict(pipe, Xf_all[VAL_MASK], y_all[VAL_MASK], cv=skf, method="predict_proba")[:,1]
+        prec, rec, thr = precision_recall_curve(y_all[VAL_MASK], prob_val)
+        ok = np.where(rec >= float(target_recall))[0]
+        thr_star = 0.0 if len(ok)==0 else float(max(thr[min(i, len(thr)-1)] for i in ok))
+        # Train on all and score all
+        pipe.fit(Xf_all, y_all)
+        fused_scores = pipe.predict_proba(Xf_all)[:,1].astype(np.float32)
+        fused_pred = (fused_scores >= thr_star).astype(np.int8)
+        df_txt2["fusion_score"] = fused_scores
+        df_txt2["fusion_pred"]  = fused_pred
+        fusion_info = {"thr": thr_star, "ap": float(average_precision_score(y_all[VAL_MASK], prob_val))}
+
+# -----------------------------
+# Authenticity metrics + Confusion Matrix + Sanity Tables + CSVs
+# -----------------------------
 metrics_text = None
 tp_idx = fp_idx = fn_idx = tn_idx = np.array([], dtype=int)
 
 if show_eval and run_detection and per_caption and ("is_bad" in df_txt2.columns):
-    from sklearn.metrics import precision_recall_fscore_support, confusion_matrix
-
     y_true = df_txt2["is_bad"].astype(int).values
-    y_pred = df_txt2["anomaly"].astype(int).values
+    if use_fusion and ("fusion_pred" in df_txt2.columns):
+        y_pred = df_txt2["fusion_pred"].astype(int).values
+        score_for_rank = df_txt2["fusion_score"].astype(float).values
+        method_note = f"{used_method} + Fusion(LR)"
+    else:
+        y_pred = df_txt2["anomaly"].astype(int).values
+        score_for_rank = df_txt2["anomaly_score"].astype(float).values
+        method_note = used_method
 
     P, R, F1, _ = precision_recall_fscore_support(y_true, y_pred, average="binary", zero_division=0)
     tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0,1]).ravel()
     metrics_text = f"Precision={P:.3f} • Recall={R:.3f} • F1={F1:.3f} • TP={tp} FP={fp} FN={fn} TN={tn}"
-
+    st.info(f"Operating point: **{method_note}**")
     st.info(f"Positives in current subset: **{int(y_true.sum())}** "
-            f"(after class/sample filters and {'all' if caps_limit==0 else f'first {caps_limit}'} captions/image)")
+            f"(after class/sample filters and {'all' if (per_caption and caps_limit==0) else f'first {caps_limit}'} captions/image)")
     st.success(f"Detection vs GT (per-caption): {metrics_text}")
 
     # Confusion matrix heatmap
     cm = np.array([[tn, fp],[fn, tp]], dtype=int)
-    fig_cm = go.Figure(
-        data=go.Heatmap(
-            z=cm,
-            x=["Pred 0 (clean)", "Pred 1 (outlier)"],
-            y=["True 0 (clean)", "True 1 (bad cap)"],
-            text=cm.astype(str),
-            texttemplate="%{text}",
-            hovertemplate="Row: %{y}<br>Col: %{x}<br>Count: %{z}<extra></extra>"
-        )
-    )
-    fig_cm.update_layout(
-        title="Confusion Matrix (Per-caption detection vs Ground Truth)",
-        xaxis_title="Prediction", yaxis_title="Ground Truth",
-        margin=dict(l=10, r=10, t=40, b=10), height=360
-    )
+    fig_cm = go.Figure(data=go.Heatmap(
+        z=cm,
+        x=["Pred 0 (clean)", "Pred 1 (outlier)"],
+        y=["True 0 (clean)", "True 1 (bad cap)"],
+        text=cm.astype(str), texttemplate="%{text}",
+        hovertemplate="Row: %{y}<br>Col: %{x}<br>Count: %{z}<extra></extra>"
+    ))
+    fig_cm.update_layout(title="Confusion Matrix (Per-caption detection vs Ground Truth)",
+                         xaxis_title="Prediction", yaxis_title="Ground Truth",
+                         margin=dict(l=10, r=10, t=40, b=10), height=360)
     st.plotly_chart(fig_cm, use_container_width=True, theme="streamlit")
 
     # Bucket indices
@@ -851,13 +1018,89 @@ if show_eval and run_detection and per_caption and ("is_bad" in df_txt2.columns)
     fn_idx = np.where((y_true == 1) & (y_pred == 0))[0]
     tn_idx = np.where((y_true == 0) & (y_pred == 0))[0]
 
-    # Qualitative examples
-    with st.expander("Qualitative examples (images + captions)"):
-        show_examples("✅ True Positives (authentic outliers)", df_txt2, tp_idx, n_examples)
-        show_examples("❌ False Positives (flagged but clean)", df_txt2, fp_idx, n_examples)
-        show_examples("⚠️ False Negatives (missed bad captions)", df_txt2, fn_idx, n_examples)
+    # ---- PR/ROC per class (validation only) ----
+    if VAL_MASK.any():
+        st.subheader("Per-class PR/ROC (validation)")
+        c1, c2 = st.columns(2)
+        with c1:
+            pr_rows = []
+            for cls, g in df_txt2[VAL_MASK].groupby("class_name"):
+                yt = g["is_bad"].astype(int).to_numpy()
+                ps = (g["fusion_score"] if (use_fusion and "fusion_score" in g.columns) else g["anomaly_score"]).astype(float).to_numpy()
+                if len(np.unique(yt)) < 2: continue
+                Pp, Rp, _ = precision_recall_curve(yt, ps)
+                AP = average_precision_score(yt, ps)
+                pr_rows.append((cls, AP, np.stack([Rp, Pp], axis=1)))
+            if pr_rows:
+                fig = go.Figure()
+                for cls, AP, pts in pr_rows:
+                    fig.add_trace(go.Scatter(x=pts[:,0], y=pts[:,1], mode="lines", name=f"{cls} (AP={AP:.2f})"))
+                fig.update_layout(title="PR curves (validation)", xaxis_title="Recall", yaxis_title="Precision", height=360)
+                st.plotly_chart(fig, use_container_width=True, theme="streamlit")
+        with c2:
+            roc_rows = []
+            for cls, g in df_txt2[VAL_MASK].groupby("class_name"):
+                yt = g["is_bad"].astype(int).to_numpy()
+                ps = (g["fusion_score"] if (use_fusion and "fusion_score" in g.columns) else g["anomaly_score"]).astype(float).to_numpy()
+                if len(np.unique(yt)) < 2: continue
+                fpr, tpr, _ = roc_curve(yt, ps); A = auc(fpr, tpr)
+                roc_rows.append((cls, A, np.stack([fpr, tpr], axis=1)))
+            if roc_rows:
+                fig = go.Figure()
+                for cls, A, pts in roc_rows:
+                    fig.add_trace(go.Scatter(x=pts[:,0], y=pts[:,1], mode="lines", name=f"{cls} (AUC={A:.2f})"))
+                fig.update_layout(title="ROC curves (validation)", xaxis_title="FPR", yaxis_title="TPR", height=360)
+                st.plotly_chart(fig, use_container_width=True, theme="streamlit")
 
-    # ----- CSV exports for all 4 buckets -----
+        # quick "lift over global"
+        if use_fusion and ("fusion_score" in df_txt2.columns):
+            ps_val = df_txt2.loc[VAL_MASK, "fusion_score"].to_numpy()
+        else:
+            ps_val = df_txt2.loc[VAL_MASK, "anomaly_score"].to_numpy()
+        yt_val = df_txt2.loc[VAL_MASK, "is_bad"].astype(int).to_numpy()
+        AP_global = float(average_precision_score(yt_val, ps_val)) if len(np.unique(yt_val))>1 else 0.0
+        better = 0; total = 0
+        for cls, g in df_txt2[VAL_MASK].groupby("class_name"):
+            yt = g["is_bad"].astype(int).to_numpy()
+            if len(np.unique(yt)) < 2: continue
+            ps = (g["fusion_score"] if (use_fusion and "fusion_score" in g.columns) else g["anomaly_score"]).to_numpy()
+            APc = float(average_precision_score(yt, ps))
+            total += 1; better += int(APc > AP_global)
+        if total > 0:
+            st.info(f"Per-class lift over global AP in {better}/{total} classes ({100.0*better/total:.1f}%).")
+
+    # ----- Ranked tables: sorted by score -----
+    def _rank_table(df_src, idxs, bucket_name, score_vec):
+        if len(idxs) == 0: return pd.DataFrame(columns=["bucket","score","class_name","image_relpath","caption_short","cosine_sim"])
+        sub = df_src.iloc[idxs].copy()
+        sub["bucket"] = bucket_name
+        sub["score"]  = score_vec[idxs]
+        sub = sub.sort_values("score", ascending=False)
+        return sub[["bucket","score","class_name","image_relpath","caption_short","cosine_sim"]]
+
+    df_tp = _rank_table(df_txt2, tp_idx, "TP", score_for_rank)
+    df_fp = _rank_table(df_txt2, fp_idx, "FP", score_for_rank)
+    df_fn = _rank_table(df_txt2, fn_idx, "FN", score_for_rank)
+    st.subheader("Ranked detections")
+    st.dataframe(df_tp.head(topN_sanity), use_container_width=True)
+    st.dataframe(df_fp.head(topN_sanity), use_container_width=True)
+    st.dataframe(df_fn.head(topN_sanity), use_container_width=True)
+
+    # Per-class Top-N missed bad captions (largest score among FN)
+    st.subheader("Per-class Top-N missed bad captions")
+    Nmiss = min(5, topN_sanity)
+    rows = []
+    scname = "fusion_score" if (use_fusion and "fusion_score" in df_txt2.columns) else "anomaly_score"
+    for cls, g in df_txt2[(df_txt2["is_bad"]==1) & (pd.Series(y_pred)==0) & (df_txt2["class_name"].notna())].groupby("class_name"):
+        gg = g.sort_values(scname, ascending=False).head(Nmiss)
+        for _, r in gg.iterrows():
+            rows.append({"class_name": cls, "score": float(r[scname]), "image_relpath": r["image_relpath"], "caption_short": r["caption_short"]})
+    if rows:
+        st.dataframe(pd.DataFrame(rows), use_container_width=True)
+    else:
+        st.caption("No missed bad captions under current selection.")
+
+    # ----- CSV exports (TP/FP/FN/TN) -----
     def _csv_for(df_src: pd.DataFrame, idxs: np.ndarray, bucket: str) -> pd.DataFrame:
         if len(idxs) == 0:
             return pd.DataFrame(columns=[
@@ -871,21 +1114,16 @@ if show_eval and run_detection and per_caption and ("is_bad" in df_txt2.columns)
             "bucket","class_name","class_id","image_relpath","caption_short",
             "cosine_sim","anomaly_score","x","y","class_color"
         ]]
-
     df_tp_csv = _csv_for(df_txt2, tp_idx, "TP")
     df_fp_csv = _csv_for(df_txt2, fp_idx, "FP")
     df_fn_csv = _csv_for(df_txt2, fn_idx, "FN")
     df_tn_csv = _csv_for(df_txt2, tn_idx, "TN")
     df_all_csv = pd.concat([df_tp_csv, df_fp_csv, df_fn_csv, df_tn_csv], ignore_index=True)
-
     with st.expander("📥 Download detections (CSV)"):
-        st.download_button(
-            "Download ALL buckets (TP/FP/FN/TN)",
-            data=df_all_csv.to_csv(index=False),
-            file_name="detections_all_buckets.csv",
-            mime="text/csv",
-            use_container_width=True
-        )
+        st.download_button("Download ALL buckets (TP/FP/FN/TN)",
+                           data=df_all_csv.to_csv(index=False),
+                           file_name="detections_all_buckets.csv",
+                           mime="text/csv", use_container_width=True)
         c1,c2,c3,c4 = st.columns(4)
         c1.download_button("TP.csv", df_tp_csv.to_csv(index=False), "tp.csv", "text/csv")
         c2.download_button("FP.csv", df_fp_csv.to_csv(index=False), "fp.csv", "text/csv")
@@ -896,12 +1134,6 @@ if show_eval and run_detection and per_caption and ("is_bad" in df_txt2.columns)
 # Plotting helpers
 # -----------------------------
 def _auth_traces_for_text(df: pd.DataFrame):
-    """
-    Return Plotly traces for text points authenticity when available.
-    - True outliers (is_bad==1 & anomaly==1): red X
-    - False positives (is_bad==0 & anomaly==1): white X
-    - Missed bad (is_bad==1 & anomaly==0): orange diamond-open
-    """
     traces = []
     if "is_bad" not in df.columns or "anomaly" not in df.columns:
         return traces
@@ -964,18 +1196,12 @@ def _auth_traces_for_text(df: pd.DataFrame):
     return traces
 
 def _outlier_traces_by_class(df: pd.DataFrame, name_prefix="Outlier"):
-    """
-    Build per-class outlier 'X' traces so that outliers keep the same color as their class.
-    Used when authenticity overlays are OFF.
-    """
     out = df[df["anomaly"].astype(bool)].copy()
     if out.empty:
         return []
-
     traces = []
     for cls, g in out.groupby("class_name", sort=False):
         cls_color = colors.get(cls, None)
-
         custom = np.stack([
             g["class_name"].astype(str).values,
             g["image_relpath"].astype(str).values,
@@ -983,7 +1209,6 @@ def _outlier_traces_by_class(df: pd.DataFrame, name_prefix="Outlier"):
             g["cosine_sim"].astype(float).values,
             g["anomaly_score"].astype(float).values
         ], axis=1)
-
         hover = (
             "class=%{customdata[0]}<br>"
             "🖼 %{customdata[1]}<br>"
@@ -991,17 +1216,11 @@ def _outlier_traces_by_class(df: pd.DataFrame, name_prefix="Outlier"):
             "cosine=%{customdata[3]:.3f}<br>"
             "score=%{customdata[4]:.3f}<extra></extra>"
         )
-
         traces.append(go.Scatter(
             x=g["x"], y=g["y"], mode="markers", name=f"{name_prefix} · {cls}",
-            marker=dict(
-                symbol="x", size=outlier_size,
-                color=cls_color,                      # class color
-                line=dict(width=outlier_width, color=cls_color)
-            ),
-            customdata=custom,
-            hovertemplate=hover,
-            showlegend=True,
+            marker=dict(symbol="x", size=outlier_size, color=cls_color,
+                        line=dict(width=outlier_width, color=cls_color)),
+            customdata=custom, hovertemplate=hover, showlegend=True,
         ))
     return traces
 
@@ -1011,8 +1230,7 @@ def _scatter_with_outliers(df: pd.DataFrame, title: str, authenticity_for_text: 
 
     base = px.scatter(
         df[~mask], x="x", y="y", color="class_name",
-        hover_data=hover_cols,
-        title=title,
+        hover_data=hover_cols, title=title,
         color_discrete_map=colors, opacity=0.85, render_mode="webgl"
     )
     base.update_traces(marker=dict(size=6, line=dict(width=0)))

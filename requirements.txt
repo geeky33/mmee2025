@@ -12,3 +12,4 @@ plotly
 fastapi
 uvicorn[standard]
 streamlit
+streamlit-plotly-events
