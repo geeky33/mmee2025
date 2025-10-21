@@ -1,0 +1,25 @@
+cff-version: 1.2.0
+title: "MMEE: Multimodal Embedding Explorer"
+authors:
+
+* family-names: "Pandey"
+  given-names: "Aarya"
+  affiliation: "Veermata Jijabai Technological Institute (VJTI), Mumbai"
+  email: "[aaryap1204@gmail.com](mailto:aaryap1204@gmail.com)"
+  version: "1.0.0"
+  date-released: 2025-10-21
+  repository-code: "[https://github.com/geeky33/mmee2025](https://github.com/geeky33/mmee2025)"
+  license: "MIT"
+  message: >-
+  If you use this software, please cite it as below.
+
+preferred-citation:
+type: software
+title: "MMEE: Multimodal Embedding Explorer — Interactive Visualization and Outlier Detection Tool for Image-Text Embeddings"
+authors:
+- family-names: "Pandey"
+given-names: "Aarya"
+year: 2025
+version: "1.0.0"
+url: "[https://github.com/geeky33/mmee2025](https://github.com/geeky33/mmee2025)"
+institution: "Intel OpenVINO (Google Summer of Code 2025)"

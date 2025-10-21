@@ -1,0 +1,57 @@
+├── .devcontainer/
+│   └── devcontainer.json
+├── .gitignore
+├── DOCUMENTATION.md
+├── app/
+│   ├── config/
+│   │   ├── __init__.py
+│   │   └── settings.py
+│   ├── data_loaders/
+│   │   ├── __init__.py
+│   │   ├── caption_loader.py
+│   │   ├── dataset_loader.py
+│   │   └── label_loader.py
+│   ├── detection/
+│   │   ├── __init__.py
+│   │   ├── evaluation.py
+│   │   ├── fusion_scorer.py
+│   │   └── outlier_detectors.py
+│   ├── embedding/
+│   │   ├── __init__.py
+│   │   ├── compute.py
+│   │   └── projection.py
+│   ├── main.py
+│   ├── ui/
+│   │   ├── __init__.py
+│   │   ├── display.py
+│   │   └── sidebar.py
+│   ├── utils/
+│   │   ├── __init__.py
+│   │   ├── clip_utils.py
+│   │   ├── helpers.py
+│   │   └── validation.py
+│   └── visualization/
+│       ├── __init__.py
+│       ├── plotly_helpers.py
+│       └── trace_builders.py
+├── backend/
+│   ├── graph.py
+│   └── main.py
+├── cache/
+│   ├── embeddings/
+│   ├── projections/
+│   └── thumbs/
+├── requirements.txt
+├── tools/
+│   ├── add_bad_captions.py
+│   ├── check_gt.py
+│   └── eval_sweep.py
+└── utils/
+    ├── cache_utils.py
+    ├── clip_utils.py
+    ├── io_utils.py
+    ├── prepare_coco.py
+    ├── prepare_cub.py
+    ├── prepare_groundcap.py
+    ├── proj_utils.py
+    └── siglip_utils.py
