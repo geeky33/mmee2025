@@ -151,7 +151,6 @@ This launches the full interactive Streamlit UI.
 ##  Technologies Used
 
 * **Frontend:** Streamlit + Plotly
-* **Backend:** FastAPI (for graph services)
 * **ML Libraries:** scikit-learn, UMAP-learn, NumPy, Pandas
 * **Model:** CLIP (OpenAI / LAION variants)
 
