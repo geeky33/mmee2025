@@ -112,9 +112,7 @@ streamlit run app/main.py
 │       ├── __init__.py
 │       ├── plotly_helpers.py
 │       └── trace_builders.py
-├── backend/
-│   ├── graph.py
-│   └── main.py
+|
 ├── cache/
 │   ├── embeddings/
 │   ├── projections/
@@ -125,14 +123,10 @@ streamlit run app/main.py
 │   ├── check_gt.py
 │   └── eval_sweep.py
 └── utils/
-    ├── cache_utils.py
-    ├── clip_utils.py
-    ├── io_utils.py
     ├── prepare_coco.py
     ├── prepare_cub.py
     ├── prepare_groundcap.py
     ├── proj_utils.py
-    └── siglip_utils.py
 ```
 
 **Entry point**: `app/main.py` (Streamlit). Launch with:
@@ -205,12 +199,8 @@ streamlit run app/main.py
 
 #### `utils/` — Global library (model/data utilities)
 
-* **cache_utils.py** — Signature hashing, path‑safe cache keys, read/write helpers.
-* **clip_utils.py** — Core CLIP image/text embedding functions (called by `app/embedding/compute.py`), optional projection wrappers.
-* **io_utils.py** — I/O helpers: safe JSON/CSV read/write, recursive file discovery, image filters.
 * **prepare_coco.py / prepare_cub.py / prepare_groundcap.py** — Dataset converters to the expected `images/`, `captions.json`, `labels.json` format.
 * **proj_utils.py** — Projection utilities (PCA/TSNE/UMAP adapters), conditionally used where app‑local fallbacks aren’t desired.
-* **siglip_utils.py** — Alternative encoder support (e.g., SigLIP) for experimentation.
 
 ---
 
