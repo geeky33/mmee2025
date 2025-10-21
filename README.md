@@ -82,13 +82,9 @@ The **Multimodal Embedding Explorer (MMEE)** is an interactive visualization and
 │   ├── check_gt.py               # Ground-truth checker
 │   └── eval_sweep.py             # Evaluation sweeps over models
 └── utils/                        # Shared cross-module utilities
-    ├── cache_utils.py            # Caching and data signatures
-    ├── io_utils.py               # File I/O and dataset prep
     ├── prepare_coco.py           # Prepare COCO dataset
     ├── prepare_cub.py            # Prepare CUB dataset
     ├── prepare_groundcap.py      # Prepare GroundCap dataset
-    ├── proj_utils.py             # Projection helper utilities
-    └── siglip_utils.py           # SigLIP embedding utilities
 ```
 
 ### ▶️ Entry Point
