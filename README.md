@@ -104,7 +104,7 @@ This launches the full interactive Streamlit UI.
 1. **Clone the repository:**
 
    ```bash
-   git clone https://github.com/<your-username>/mmee.git
+   git clone https://github.com/geeky33/mmee2025.git
    cd mmee
    ```
 
