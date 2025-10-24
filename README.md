@@ -88,7 +88,20 @@ The **Multimodal Embedding Explorer (MMEE)** is an interactive visualization and
     ├── prepare_groundcap.py      # Prepare GroundCap dataset
 ```
 
-### ▶️ Entry Point
+
+# SNAPSHOTS:
+![Figure 1: PCA projections showing cluster separation](image.png)
+
+![Figure 2: Outlier overlay - noisy captions marked in red](image-1.png)
+
+![Figure 3: Confusion matrix comparing predictions vs. ground truth](image-2.png)
+
+![Figure 4: Cosine Similarity Sanity check in CLIP space](image-3.png)
+
+![Figure 5: Ranked Detections for each part of Confusion Matrix](image-4.png)
+
+
+# Entry Point
 
 The application starts from:
 
@@ -100,6 +113,7 @@ This launches the full interactive Streamlit UI.
 
 # DEMO VIDEO:
 
+[video](./streamlit-main-2025-10-24-07-10-67.webm)
 ---
 
 ## ⚙️ Installation & Setup
@@ -108,7 +122,7 @@ This launches the full interactive Streamlit UI.
 
    ```bash
    git clone https://github.com/geeky33/mmee2025.git
-   cd mmee
+   cd mmee2025
    ```
 
 2. **Create a virtual environment (optional but recommended):**
