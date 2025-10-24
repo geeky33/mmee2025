@@ -38,8 +38,8 @@ This project follows a standard, respectful Code of Conduct. Be kind, assume pos
 ### 1) Clone & Environment
 
 ```bash
-git clone <your-repo-url>
-cd <repo>
+git clone https://github.com/geeky33/mmee2025.git
+cd mmee2025
 
 python -m venv .venv
 # bash/zsh
@@ -203,4 +203,4 @@ Use `good first issue` only for self‑contained, well‑scoped tasks with guida
 * [ ] Manual QA steps described; screenshots/GIFs for UI
 * [ ] No secrets/PII; large files excluded
 
-Welcome aboard — and thanks for helping improve MMEE! 🙌
+Welcome aboard — and thanks for helping improve MMEE!

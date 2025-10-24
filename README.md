@@ -1,6 +1,7 @@
 #  MMEE — Multimodal Embedding Explorer
 
-The **Multimodal Embedding Explorer (MMEE)** is an interactive visualization and analysis tool built with **Streamlit** and **FastAPI** for exploring **joint image-text embeddings** derived from CLIP and similar models. It helps researchers, data scientists, and developers analyze alignment, detect outliers, and evaluate dataset authenticity in multimodal datasets.
+The **Multimodal Embedding Explorer (MMEE)** is an interactive visualization and analysis tool built with **Streamlit** for exploring **joint image-text embeddings** derived from CLIP and similar models. It helps researchers, data scientists, and developers analyze alignment, detect outliers, and evaluate dataset authenticity in multimodal datasets.
+
 
 ---
 
@@ -96,6 +97,8 @@ streamlit run app/main.py
 ```
 
 This launches the full interactive Streamlit UI.
+
+# DEMO VIDEO:
 
 ---
 

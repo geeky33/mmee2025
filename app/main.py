@@ -1,6 +1,5 @@
 """
 MMEE Embedding Viewer - Main Application
-Clean, modular entry point that orchestrates all components.
 
 Usage:
     streamlit run app/main.py
@@ -117,7 +116,7 @@ for p in candidates:
         settings.DATA_ROOT = p
         break
 
-st.sidebar.caption(f"📁 Using DATA_ROOT = {settings.DATA_ROOT}")
+st.sidebar.caption(f" Using DATA_ROOT = {settings.DATA_ROOT}")
 
 # ============================================================================
 # DATASET DISCOVERY & SELECTION
@@ -836,7 +835,7 @@ with st.expander("Single-view: Joint-blend projection (uses α above)"):
 # COSINE SIMILARITY SANITY CHECK
 # ============================================================================
 st.divider()
-st.markdown("### 🔎 Optional: Cosine similarity sanity check (CLIP space)")
+st.markdown("### Cosine similarity sanity check (CLIP space)")
 
 idx = st.slider("Pick an image index", 0, len(IMG) - 1, 0)
 

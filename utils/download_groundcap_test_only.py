@@ -55,6 +55,6 @@ out_json = out_dir / "groundcap_test_annotations.json"
 with out_json.open("w", encoding="utf-8") as f:
     json.dump(annotations, f, ensure_ascii=False, indent=2)
 
-print("✅ Done! Test split saved under:", out_dir)
+print(" Done! Test split saved under:", out_dir)
 print(f"   - images/: {len(list(img_out.glob('*.jpg')))} files")
 print(f"   - {out_json.name}: {out_json.stat().st_size/1024:.1f} KB")
