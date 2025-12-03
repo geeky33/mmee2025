@@ -5,7 +5,16 @@ Handles finding and organizing datasets under the data/ directory.
 
 from pathlib import Path
 from typing import Dict, List
-from ..config.settings import IMAGE_EXTENSIONS
+try:
+    # Prefer absolute import when running as a script or when package root is set
+    from app.config.settings import IMAGE_EXTENSIONS
+except ImportError:
+    try:
+        # Fallback to relative import when executed as a proper package module
+        from ..config.settings import IMAGE_EXTENSIONS
+    except ImportError:
+        # Final fallback: sensible default extensions to keep functionality working
+        IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tiff"}
 
 
 def discover_datasets(data_root: Path) -> Dict[str, Dict[str, Path]]:

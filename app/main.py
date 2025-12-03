@@ -13,11 +13,12 @@ from collections import defaultdict
 import numpy as np
 import pandas as pd
 import streamlit as st
+import plotly.graph_objects as go
+import plotly.io as pio
 
 # Suppress optional warnings
 warnings.filterwarnings("ignore", message="QuickGELU mismatch.*")
 
-# Ensure project root is on path
 PROJ_DIR = Path(__file__).resolve().parents[1]
 if str(PROJ_DIR) not in sys.path:
     sys.path.insert(0, str(PROJ_DIR))
@@ -92,17 +93,178 @@ from app.utils import (
 )
 
 # ============================================================================
-# PAGE CONFIGURATION
+# PLOTLY GLASSY HELPER
+# ============================================================================
+pio.templates.default = "plotly_dark"
+
+
+def make_glassy(fig: go.Figure) -> go.Figure:
+    """Apply transparent / neon layout so Plotly matches the glass UI."""
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#F6F6FF"),
+        legend=dict(
+            bgcolor="rgba(0,0,0,0)",
+            borderwidth=0,
+        ),
+        xaxis=dict(
+            showgrid=False,
+            zeroline=False,
+            linecolor="rgba(255,255,255,0.20)",
+        ),
+        yaxis=dict(
+            showgrid=False,
+            zeroline=False,
+            linecolor="rgba(255,255,255,0.20)",
+        ),
+    )
+    return fig
+
+
+# ============================================================================
+# PAGE CONFIGURATION + THEME
 # ============================================================================
 st.set_page_config(
     page_title=settings.PAGE_TITLE,
-    layout=settings.PAGE_LAYOUT
+    layout=settings.PAGE_LAYOUT,
 )
 
-st.title(" • MULTI-MODAL EMBEDDING EXPLORER")
+# Global CSS for modern glassy theme
+st.markdown(
+    """
+<style>
+/* -------- GLOBAL BACKGROUND (behind the glass) -------- */
+html, body, [data-testid="stAppViewContainer"] {
+    background: radial-gradient(circle at top left,#221947 0,#05030A 40%,#020308 100%) !important;
+}
+
+/* Remove default white-ish containers */
+section.main {
+    background: transparent !important;
+}
+
+/* -------- SIDEBAR: GLASS PANEL -------- */
+[data-testid="stSidebar"] {
+    background: linear-gradient(135deg,
+        rgba(11, 14, 28, 0.88),
+        rgba(7, 10, 22, 0.72)
+    ) !important;
+    backdrop-filter: blur(22px) saturate(135%);
+    -webkit-backdrop-filter: blur(22px) saturate(135%);
+    border-right: 1px solid rgba(255, 255, 255, 0.06);
+    box-shadow: 0 0 40px rgba(0, 0, 0, 0.55);
+}
+
+/* -------- MAIN CONTAINER PADDING -------- */
+div.block-container {
+    padding-top: 1.2rem;
+    padding-bottom: 2rem;
+}
+
+/* -------- GLASS CARDS -------- */
+.mmee-card {
+    padding: 1.2rem 1.4rem;
+    border-radius: 18px;
+    background: radial-gradient(circle at top left,
+        rgba(154,107,255,0.20),
+        rgba(10,12,30,0.78)
+    );
+    border: 1px solid rgba(255,255,255,0.16);
+    box-shadow:
+        0 18px 45px rgba(0, 0, 0, 0.70),
+        0 0 0 1px rgba(255,255,255,0.03);
+    backdrop-filter: blur(18px) saturate(145%);
+    -webkit-backdrop-filter: blur(18px) saturate(145%);
+    margin-bottom: 1.2rem;
+}
+
+/* HEADER BANNER (the top MMEE 2025 block) */
+.mmee-header {
+    padding: 1.1rem 1.4rem;
+    border-radius: 20px;
+    background: radial-gradient(circle at top left,
+        rgba(154,107,255,0.30),
+        rgba(12,16,40,0.80)
+    );
+    border: 1px solid rgba(199,179,255,0.55);
+    backdrop-filter: blur(20px) saturate(150%);
+    -webkit-backdrop-filter: blur(20px) saturate(150%);
+    box-shadow:
+        0 22px 55px rgba(0, 0, 0, 0.75),
+        0 0 0 1px rgba(255,255,255,0.05);
+    margin-bottom: 1.0rem;
+}
+
+/* -------- METRIC “PILLS” -------- */
+.mmee-metric {
+    padding: 0.9rem 1.1rem;
+    border-radius: 999px;
+    background: linear-gradient(135deg,
+        rgba(15, 201, 179, 0.18),
+        rgba(5, 10, 30, 0.9)
+    );
+    border: 1px solid rgba(111, 231, 210, 0.55);
+    backdrop-filter: blur(16px) saturate(145%);
+    -webkit-backdrop-filter: blur(16px) saturate(145%);
+}
+
+/* -------- BUTTONS -------- */
+.stButton > button {
+    background: linear-gradient(135deg,#9A6BFF,#45E1C3) !important;
+    color: #FFFFFF !important;
+    border-radius: 999px !important;
+    border: none !important;
+    padding: 0.35rem 1.2rem !important;
+    font-weight: 600 !important;
+    letter-spacing: 0.02em;
+    transition: all 0.18s ease-out;
+}
+.stButton > button:hover {
+    transform: translateY(-1px) scale(1.03);
+    box-shadow: 0 12px 32px rgba(0,0,0,0.85);
+}
+
+/* -------- SLIDERS -------- */
+[data-baseweb="slider"] div[role="slider"] {
+    background: #9A6BFF !important;
+}
+
+/* -------- HEADINGS / TEXT -------- */
+h1, h2, h3 {
+    letter-spacing: 0.03em;
+}
+[data-testid="stMarkdownContainer"] p {
+    font-size: 0.92rem;
+}
+
+/* DATAFRAME GLASS EDGE */
+[data-testid="stDataFrame"] {
+    border-radius: 14px;
+    overflow: hidden;
+    border: 1px solid rgba(255,255,255,0.10);
+}
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+st.markdown(
+    """
+<div class="mmee-header">
+  <div style="font-size: 1.3rem; font-weight: 600; letter-spacing: 0.06em;">
+    MMEE 2025 · MULTI-MODAL EMBEDDING EXPLORER
+  </div>
+  <div style="opacity: 0.85; margin-top: 0.25rem; font-size: 0.9rem;">
+    Glassy joint-embedding lab for CLIP image–text projections, outlier detection, and caption diagnostics.
+  </div>
+</div>
+""",
+    unsafe_allow_html=True,
+)
 
 # ============================================================================
-# DATA ROOT RESOLUTION (robust to inner/outer repo layout)
+# DATA ROOT RESOLUTION
 # ============================================================================
 # Try the configured path, then common fallbacks relative to this file
 DATA_ROOT = Path(settings.DATA_ROOT) if getattr(settings, "DATA_ROOT", None) else PROJ_DIR / "data"
@@ -130,8 +292,9 @@ if not DATASETS:
     )
     st.stop()
 
-# Render sidebar controls
+# Render sidebar dataset selector
 with st.sidebar:
+    st.markdown("### 📂 Dataset")
     dataset_name = render_dataset_selector(DATASETS)
 
 # Reset embeddings if dataset changed
@@ -179,15 +342,24 @@ else:
 # ============================================================================
 with st.sidebar:
     render_paths_display(IMAGES_DIR, ACTIVE_CAPTIONS_JSON, LABELS_JSON)
-    
+
+    st.markdown("### ⚙️ Model & Projections")
     model_name, pretrained, batch_img = render_model_controls()
     projection_params = render_projection_controls()
+
+    st.markdown("### 📝 Captions")
     caption_params = render_caption_controls()
+
+    st.markdown("### 🧪 Joint & Outliers")
     joint_params = render_joint_outlier_controls(projection_params["method"])
     outlier_params = render_outlier_method_controls()
     combine_mode = render_combine_mode_control()
+
+    st.markdown("### 🧬 Validation & Fusion")
     validation_params = render_validation_controls()
     fusion_params = render_fusion_controls()
+
+    st.markdown("### 📊 Display & Eval")
     display_params = render_display_controls()
     eval_params = render_evaluation_controls()
 
@@ -199,7 +371,7 @@ with st.status("Loading dataset (images, labels, captions)…", expanded=False):
     if not IMG_PATHS:
         st.error("No images found under data/images.")
         st.stop()
-    
+
     CAP_MAP = read_captions(ACTIVE_CAPTIONS_JSON)
     DF = read_labels(LABELS_JSON, IMG_PATHS, IMAGES_DIR)
 
@@ -210,6 +382,7 @@ all_classes = sorted(DF["class_name"].unique().tolist())
 max_per_class = int(DF["class_name"].value_counts().max()) if not DF.empty else 1
 
 with st.sidebar:
+    st.markdown("### 🎯 Subset & Sampling")
     subset_params = render_subset_sampling_controls(
         all_classes, dataset_name, max_per_class
     )
@@ -255,7 +428,7 @@ if per_caption:
     )
     n_txt_expected = len(cap_payload)
     agg_tag = get_aggregation_tag(per_caption, caps_limit, text_agg)
-    
+
     sel_note = "all captions per image" if caps_limit == 0 else f"first {caps_limit} captions/image"
     st.info(f"GT positives computed over current subset and {sel_note}.")
 else:
@@ -364,9 +537,9 @@ if per_caption:
     cos_pairs_caps = (
         rowwise_cosine_similarity(IMG_rep, TXT)
         if len(IMG_rep)
-        else np.zeros((0,), dtype=np.float32)
+        else np.zeros((0,), np.float32)
     )
-    
+
     # Aggregate cosine per image
     sim_by_img = defaultdict(list)
     for j, i in enumerate(cap_img_idx):
@@ -403,7 +576,7 @@ if per_caption:
     parent_id = DF["class_id"].values
     parent_relpath = DF["image_relpath"].values
     cap_short = [shorten_text(c) for c in cap_texts]
-    
+
     df_txt2 = pd.DataFrame({
         "x": P_TXT[:, 0],
         "y": P_TXT[:, 1],
@@ -418,7 +591,7 @@ if per_caption:
 else:
     first_caps = [caps[0] if caps else "" for caps in cap_payload]
     cap_short = [shorten_text(c) for c in first_caps]
-    
+
     df_txt2 = pd.DataFrame({
         "x": P_TXT[:, 0],
         "y": P_TXT[:, 1],
@@ -438,14 +611,14 @@ if per_caption:
     counter = defaultdict(int)
     aligned_is_bad = []
     rels = df_txt2["image_relpath"].tolist()
-    
+
     for rel in rels:
         k = counter[rel]
         seq = BAD_GT.get(rel) or BAD_GT.get(Path(rel).name)
         flag = int(seq[k]) if (seq and k < len(seq)) else 0
         aligned_is_bad.append(flag)
         counter[rel] += 1
-    
+
     df_txt2["is_bad"] = aligned_is_bad
 else:
     df_txt2["is_bad"] = 0
@@ -471,7 +644,7 @@ used_method = None
 if display_params["run_detection"]:
     # Choose detection space
     method_space = joint_params["method_space"]
-    
+
     if method_space.startswith("Raw"):
         X_det = J
         target_df = (
@@ -485,7 +658,7 @@ if display_params["run_detection"]:
     else:
         X_det = P_TXT
         target_df = df_txt2
-    
+
     # Run class-wise detection
     Lmat, Smat = run_classwise_detector(
         X_det,
@@ -494,10 +667,10 @@ if display_params["run_detection"]:
         outlier_params["params"]["contamination"],
         outlier_params["params"]
     )
-    
+
     # Combine per-class predictions
     OUT_LABELS, OUT_SCORES = combine_classwise_predictions(Lmat, Smat, combine_mode)
-    
+
     # Update target DataFrame
     target_df["anomaly"] = (OUT_LABELS == 1)
     target_df["anomaly_score"] = OUT_SCORES
@@ -524,7 +697,7 @@ if per_caption and ("is_bad" in df_txt2.columns):
     st.caption(f"GT positives computed over current subset and {caption_mode_note}/image.")
 
 # ============================================================================
-# FUSION SCORER (OPTIONAL)
+# FUSION SCORER
 # ============================================================================
 fusion_info = None
 
@@ -558,7 +731,7 @@ if (
     and ("is_bad" in df_txt2.columns)
 ):
     y_true = df_txt2["is_bad"].astype(int).values
-    
+
     if fusion_params["use_fusion"] and ("fusion_pred" in df_txt2.columns):
         y_pred = df_txt2["fusion_pred"].astype(int).values
         score_for_rank = df_txt2["fusion_score"].astype(float).values
@@ -567,10 +740,10 @@ if (
         y_pred = df_txt2["anomaly"].astype(int).values
         score_for_rank = df_txt2["anomaly_score"].astype(float).values
         method_note = used_method
-    
+
     # Compute metrics
     metrics = compute_detection_metrics(y_true, y_pred)
-    
+
     # Display results
     caption_mode_note = "all" if caps_limit == 0 else f"first {caps_limit}"
     display_detection_results(
@@ -579,25 +752,26 @@ if (
         int(y_true.sum()),
         caption_mode_note
     )
-    
+
     # Confusion matrix
     cm_fig = create_confusion_matrix_heatmap(
         metrics["tn"], metrics["fp"], metrics["fn"], metrics["tp"]
     )
+    cm_fig = make_glassy(cm_fig)
     st.plotly_chart(cm_fig, use_container_width=True, theme="streamlit")
-    
+
     # Get confusion buckets
     buckets = get_confusion_buckets(y_true, y_pred)
     tp_idx = buckets["tp"]
     fp_idx = buckets["fp"]
     fn_idx = buckets["fn"]
     tn_idx = buckets["tn"]
-    
+
     # PR/ROC curves per class (validation only)
     if VAL_MASK.any():
         st.subheader("Per-class PR/ROC (validation)")
         col1, col2 = st.columns(2)
-        
+
         with col1:
             pr_data = []
             for cls, g in df_txt2[VAL_MASK].groupby("class_name"):
@@ -607,24 +781,26 @@ if (
                     if (fusion_params["use_fusion"] and "fusion_score" in g.columns)
                     else g["anomaly_score"]
                 ).astype(float).to_numpy()
-                
+
                 if len(np.unique(yt)) < 2:
                     continue
-                
+
                 curves = compute_pr_roc_curves(yt, ps)
                 pr_data.append((
                     cls,
                     curves["ap"],
                     np.stack([curves["recall"], curves["precision"]], axis=1)
                 ))
-            
+
             if pr_data:
+                pr_fig = create_pr_curve(pr_data)
+                pr_fig = make_glassy(pr_fig)
                 st.plotly_chart(
-                    create_pr_curve(pr_data),
+                    pr_fig,
                     use_container_width=True,
                     theme="streamlit"
                 )
-        
+
         with col2:
             roc_data = []
             for cls, g in df_txt2[VAL_MASK].groupby("class_name"):
@@ -634,39 +810,41 @@ if (
                     if (fusion_params["use_fusion"] and "fusion_score" in g.columns)
                     else g["anomaly_score"]
                 ).astype(float).to_numpy()
-                
+
                 if len(np.unique(yt)) < 2:
                     continue
-                
+
                 curves = compute_pr_roc_curves(yt, ps)
                 roc_data.append((
                     cls,
                     curves["auc"],
                     np.stack([curves["fpr"], curves["tpr"]], axis=1)
                 ))
-            
+
             if roc_data:
+                roc_fig = create_roc_curve(roc_data)
+                roc_fig = make_glassy(roc_fig)
                 st.plotly_chart(
-                    create_roc_curve(roc_data),
+                    roc_fig,
                     use_container_width=True,
                     theme="streamlit"
                 )
-    
+
     # Ranked tables
     score_col = (
         "fusion_score"
         if (fusion_params["use_fusion"] and "fusion_score" in df_txt2.columns)
         else "anomaly_score"
     )
-    
+
     df_tp = create_bucket_dataframe(df_txt2, tp_idx, "TP", score_col)
     df_fp = create_bucket_dataframe(df_txt2, fp_idx, "FP", score_col)
     df_fn = create_bucket_dataframe(df_txt2, fn_idx, "FN", score_col)
-    
+
     display_ranked_table(df_tp, "Ranked detections: True Positives", eval_params["topN_sanity"])
     display_ranked_table(df_fp, "Ranked detections: False Positives", eval_params["topN_sanity"])
     display_ranked_table(df_fn, "Ranked detections: False Negatives", eval_params["topN_sanity"])
-    
+
     # Top missed per class
     df_missed = find_top_n_missed_per_class(
         df_txt2,
@@ -675,7 +853,7 @@ if (
         score_col,
         top_n=min(5, eval_params["topN_sanity"])
     )
-    
+
     if not df_missed.empty:
         display_ranked_table(
             df_missed,
@@ -684,16 +862,18 @@ if (
         )
     else:
         st.caption("No missed bad captions under current selection.")
-    
+
     # CSV exports
     df_tn = create_bucket_dataframe(df_txt2, tn_idx, "TN", score_col)
     df_all_csv = create_export_dataframes(df_txt2, buckets, colors)
-    
+
     display_download_buttons(df_all_csv, df_tp, df_fp, df_fn, df_tn)
 
 # ============================================================================
 # SIDE-BY-SIDE PLOTS
 # ============================================================================
+st.markdown("<div class='mmee-card'>", unsafe_allow_html=True)
+
 left, right = st.columns(2, gap="large")
 
 clean_suffix = " • CLEAN" if display_params["show_clean_only"] else ""
@@ -702,7 +882,7 @@ with left:
     st.subheader(
         f"[{dataset_name}] Image embeddings • {projection_params['method']}{clean_suffix}"
     )
-    
+
     df_img_plot = (
         df_img2
         if not display_params["show_clean_only"]
@@ -716,6 +896,7 @@ with left:
         display_params["outlier_width"],
         authenticity_overlay=False
     )
+    fig_img = make_glassy(fig_img)
     st.plotly_chart(fig_img, use_container_width=True, theme="streamlit")
 
 with right:
@@ -723,7 +904,7 @@ with right:
     st.subheader(
         f"[{dataset_name}] {title_txt} embeddings • {projection_params['method']}{clean_suffix}"
     )
-    
+
     df_txt_plot = (
         df_txt2
         if not display_params["show_clean_only"]
@@ -734,7 +915,7 @@ with right:
         and per_caption
         and ("is_bad" in df_txt2.columns)
     )
-    
+
     fig_txt = create_scatter_with_outliers(
         df_txt_plot,
         colors,
@@ -743,11 +924,16 @@ with right:
         display_params["outlier_width"],
         authenticity_overlay=authenticity
     )
+    fig_txt = make_glassy(fig_txt)
     st.plotly_chart(fig_txt, use_container_width=True, theme="streamlit")
+
+st.markdown("</div>", unsafe_allow_html=True)
 
 # ============================================================================
 # JOINT PLOT
 # ============================================================================
+st.markdown("<div class='mmee-card'>", unsafe_allow_html=True)
+
 st.subheader(
     f"[{dataset_name}] Joint {projection_params['method']} (shared axes){clean_suffix}"
 )
@@ -763,14 +949,17 @@ fig_joint = create_joint_plot(
     display_params["outlier_width"],
     eval_params["overlay_auth"] and per_caption and ("is_bad" in df_txt2.columns)
 )
+fig_joint = make_glassy(fig_joint)
 st.plotly_chart(fig_joint, use_container_width=True, theme="streamlit")
+
+st.markdown("</div>", unsafe_allow_html=True)
 
 # ============================================================================
 # SINGLE-VIEW: JOINT-BLEND PROJECTION (OPTIONAL)
 # ============================================================================
 with st.expander("Single-view: Joint-blend projection (uses α above)"):
     from app.embedding.projection import project_2d
-    
+
     PJ = project_2d(
         J,
         projection_params["method"],
@@ -779,7 +968,7 @@ with st.expander("Single-view: Joint-blend projection (uses α above)"):
         projection_params["umap_neighbors"],
         projection_params["umap_min_dist"]
     )
-    
+
     # Build DataFrame for joint projection
     if per_caption:
         classes_j = [DF.iloc[i]["class_name"] for i in cap_img_idx]
@@ -787,7 +976,7 @@ with st.expander("Single-view: Joint-blend projection (uses α above)"):
         rels_j = [DF.iloc[i]["image_relpath"] for i in cap_img_idx]
         cap_short_j = [shorten_text(c) for c in cap_texts]
         cos_sim_j = cos_pairs_caps
-        
+
         if target_df is not None and "anomaly" in target_df.columns:
             anom_vals = target_df["anomaly"].astype(bool).values
             score_vals = target_df["anomaly_score"].astype(float).values
@@ -801,14 +990,14 @@ with st.expander("Single-view: Joint-blend projection (uses α above)"):
         first_caps = [caps[0] if caps else "" for caps in cap_payload]
         cap_short_j = [shorten_text(c) for c in first_caps]
         cos_sim_j = cos_pairs_caps
-        
+
         if target_df is not None and "anomaly" in target_df.columns:
             anom_vals = target_df["anomaly"].astype(bool).values
             score_vals = target_df["anomaly_score"].astype(float).values
         else:
             anom_vals = np.zeros(len(PJ), bool)
             score_vals = np.zeros(len(PJ), float)
-    
+
     df_joint = pd.DataFrame({
         "x": PJ[:, 0],
         "y": PJ[:, 1],
@@ -820,7 +1009,7 @@ with st.expander("Single-view: Joint-blend projection (uses α above)"):
         "anomaly": anom_vals,
         "anomaly_score": score_vals,
     })
-    
+
     fig_joint_blend = create_scatter_with_outliers(
         df_joint,
         colors,
@@ -829,12 +1018,14 @@ with st.expander("Single-view: Joint-blend projection (uses α above)"):
         display_params["outlier_width"],
         authenticity_overlay=False
     )
+    fig_joint_blend = make_glassy(fig_joint_blend)
     st.plotly_chart(fig_joint_blend, use_container_width=True, theme="streamlit")
 
 # ============================================================================
 # COSINE SIMILARITY SANITY CHECK
 # ============================================================================
 st.divider()
+st.markdown("<div class='mmee-card'>", unsafe_allow_html=True)
 st.markdown("### Cosine similarity sanity check (CLIP space)")
 
 idx = st.slider("Pick an image index", 0, len(IMG) - 1, 0)
@@ -842,7 +1033,7 @@ idx = st.slider("Pick an image index", 0, len(IMG) - 1, 0)
 if st.button("Top-5 closest texts for this image (cosine)"):
     sims_row = cosine_similarity(IMG[idx:idx + 1], TXT)[0]
     topk = np.argsort(-sims_row)[:5]
-    
+
     if per_caption:
         rels = [DF.iloc[cap_img_idx[i]]["image_relpath"] for i in topk]
         caps_show = [cap_texts[i] for i in topk]
@@ -851,7 +1042,7 @@ if st.button("Top-5 closest texts for this image (cosine)"):
         rels = DF["image_relpath"].values[topk]
         caps_show = [cap_payload[i][0] if cap_payload[i] else "" for i in topk]
         classes = DF["class_name"].values[topk]
-    
+
     df_sim = pd.DataFrame({
         "rank": np.arange(1, len(topk) + 1),
         "image_relpath": rels,
@@ -860,6 +1051,8 @@ if st.button("Top-5 closest texts for this image (cosine)"):
         "cosine_sim": sims_row[topk],
     })
     st.dataframe(df_sim, use_container_width=True)
+
+st.markdown("</div>", unsafe_allow_html=True)
 
 # ============================================================================
 # FOOTER NOTE
